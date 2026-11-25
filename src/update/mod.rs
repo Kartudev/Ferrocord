@@ -26,15 +26,49 @@ pub use version::Version;
 
 use crate::store::Store;
 
-/// The GitHub repository releases come from.
-pub const REPO: &str = "FerroApps/Ferrocord";
+/// The repository official releases come from.
+pub const DEFAULT_REPO: &str = "FerroApps/Ferrocord";
 /// Crate / binary name (release asset prefix).
 pub const CRATE: &str = "ferrocord";
 pub const APP_ID: &str = crate::config::APP_ID;
-/// `releases/latest` of [`REPO`].
-pub const API_URL: &str = "https://api.github.com/repos/FerroApps/Ferrocord/releases/latest";
+
+/// The GitHub repository (`owner/name`) releases come from:
+/// `FERRO_UPDATE_REPO` at build time, for forks that publish their own
+/// builds with the same asset names, else [`DEFAULT_REPO`]. A malformed
+/// value is ignored.
+pub fn repo() -> &'static str {
+    repo_from(option_env!("FERRO_UPDATE_REPO"))
+}
+
+fn repo_from(over: Option<&'static str>) -> &'static str {
+    over.map(str::trim)
+        .filter(|r| valid_repo(r))
+        .unwrap_or(DEFAULT_REPO)
+}
+
+/// `owner/name` with GitHub's characters only (nothing that could change
+/// the host or path of the URLs built from it).
+fn valid_repo(r: &str) -> bool {
+    let seg = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 100
+            && s != "."
+            && s != ".."
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    matches!(r.split_once('/'), Some((owner, name)) if seg(owner) && seg(name))
+}
+
+/// `releases/latest` of [`repo()`].
+pub fn api_url() -> String {
+    format!("https://api.github.com/repos/{}/releases/latest", repo())
+}
+
 /// Fallback release page.
-pub const RELEASES_PAGE: &str = "https://github.com/FerroApps/Ferrocord/releases";
+pub fn releases_page() -> String {
+    format!("https://github.com/{}/releases", repo())
+}
 
 /// SQLite `meta` keys.
 pub const KEY_AUTO: &str = "update.auto";
@@ -284,7 +318,7 @@ impl Updater {
     pub fn release_page(&self) -> String {
         self.latest
             .as_ref()
-            .map_or_else(|| RELEASES_PAGE.to_owned(), Release::page)
+            .map_or_else(releases_page, Release::page)
     }
 
     pub fn can_self_update(&self) -> bool {
@@ -538,6 +572,28 @@ mod tests {
             html_url: format!("https://github.com/FerroApps/Ferrocord/releases/tag/{tag}"),
             assets: vec![],
         }
+    }
+
+    #[test]
+    fn update_repo_override_is_validated() {
+        assert_eq!(repo_from(None), DEFAULT_REPO);
+        assert_eq!(repo_from(Some("Someone/Ferrocord")), "Someone/Ferrocord");
+        assert_eq!(repo_from(Some(" a-b_c.d/e.f ")), "a-b_c.d/e.f");
+        for bad in [
+            "",
+            "Ferrocord",
+            "a/b/c",
+            "../x",
+            "a/..",
+            "evil.example/x?y",
+            "a b/c",
+            "a/b#c",
+            "@x/y",
+        ] {
+            assert_eq!(repo_from(Some(bad)), DEFAULT_REPO, "{bad:?}");
+        }
+        assert!(api_url().starts_with("https://api.github.com/repos/"));
+        assert!(releases_page().starts_with("https://github.com/"));
     }
 
     fn updater() -> Updater {

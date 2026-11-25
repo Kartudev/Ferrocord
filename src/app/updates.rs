@@ -341,7 +341,7 @@ impl App {
         self.updater.latest = Some(update::Release {
             tag: format!("v{next}"),
             version: next,
-            html_url: format!("{}/tag/v{next}", update::RELEASES_PAGE),
+            html_url: format!("{}/tag/v{next}", update::releases_page()),
             assets: Vec::new(),
         });
         self.updater.method = Some(InstallMethod::Script(update::ScriptLayout {

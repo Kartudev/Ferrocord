@@ -86,7 +86,7 @@ impl Endpoint {
 
     pub fn resolve(over: Option<&str>) -> Self {
         let default = Self {
-            api_url: super::API_URL.to_owned(),
+            api_url: super::api_url(),
             loopback: false,
         };
         let Some(raw) = over.map(str::trim).filter(|s| !s.is_empty()) else {
@@ -341,8 +341,11 @@ mod tests {
 
     #[test]
     fn endpoint_override_follows_install_sh() {
-        assert_eq!(Endpoint::resolve(None).api_url, crate::update::API_URL);
-        assert!(crate::update::API_URL.contains("/repos/FerroApps/Ferrocord/releases/latest"));
+        assert_eq!(Endpoint::resolve(None).api_url, crate::update::api_url());
+        assert!(
+            crate::update::api_url()
+                .ends_with(&format!("/repos/{}/releases/latest", crate::update::repo()))
+        );
         let e = Endpoint::resolve(Some("http://127.0.0.1:5000/latest.json"));
         assert!(e.loopback);
         assert_eq!(e.api_url, "http://127.0.0.1:5000/latest.json");
@@ -354,7 +357,10 @@ mod tests {
             "file:///tmp/latest.json",
             "nonsense",
         ] {
-            assert_eq!(Endpoint::resolve(Some(bad)).api_url, crate::update::API_URL);
+            assert_eq!(
+                Endpoint::resolve(Some(bad)).api_url,
+                crate::update::api_url()
+            );
         }
     }
 
