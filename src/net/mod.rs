@@ -68,6 +68,16 @@ pub enum Event {
         voice_states: Vec<VoiceState>,
     },
     GuildDelete(GuildId),
+    /// GUILD_ROLE_CREATE / GUILD_ROLE_UPDATE.
+    RoleUpsert {
+        guild_id: GuildId,
+        role: Role,
+    },
+    /// GUILD_ROLE_DELETE.
+    RoleDelete {
+        guild_id: GuildId,
+        role_id: RoleId,
+    },
     Reaction(ReactionEvent),
     /// PRESENCE_UPDATE (friends, and members of subscribed guilds).
     PresenceUpdate {

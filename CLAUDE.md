@@ -9,7 +9,7 @@ Video (camera / Go Live) is not implemented yet: see `docs/voice.md` §6.
 
 ## Commands
 - `cargo run -- --mock` — run with mock data (no network, in-memory stores).
-- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner> out.png` — render a screen to PNG
+- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member> out.png` — render a screen to PNG
   (headless: `ICED_BACKEND=tiny-skia xvfb-run -a -s "-screen 0 1280x800x24" ...`).
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `cargo build --release`. `ferrocord --version` / `-V` (also `ferrocord-player`, `ferrocord-login`).
@@ -80,6 +80,12 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
   their own row is hovered (`App::list_phase`, `anim::Hover` + `Zone`), like the official client;
   only the profile popout plays them unhovered. Never make list cosmetics play unhovered: each
   costs 60 window redraws/s.
+- Permissions (`app/permissions.rs`): owner/Administrator -> all; else `@everyone` + roles, then channel
+  overwrites (`@everyone`, roles, member). Gate UI actions with `ChatState::channel_permissions` /
+  `can_in_guild`, never with "is owner" alone; channels without View Channel are hidden. Server admin
+  lives in `app/guild_admin.rs` (`Ui::Admin`), channels in `app/channel_admin.rs` (`Ui::Channel`), roles + member moderation in `app/role_admin.rs`
+  (`Ui::Roles`; hierarchy via `permissions::top_position`/`outranks`), REST in
+  `net/rest/guild.rs` (docs/protocol.md §15).
 - Composer is a `text_editor` (`app/composer.rs`): Enter sends, Shift+Enter newline; cursor columns are bytes. Container `shadow` is safe with ferroiced (tiny-skia clips it to the damage region), but
   the house style keeps the gradient header and sets no shadow (`ui/theme.rs` guard test).
 - Video helper (`ferrocord-player`): MP4/MOV is read by our own `mp4.rs` (progressive + fragmented `moof`, QuickTime);

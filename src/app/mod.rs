@@ -4,6 +4,7 @@
 pub mod actions;
 pub mod anim;
 mod background;
+pub mod channel_admin;
 pub mod composer;
 pub mod context;
 pub mod cosmetics;
@@ -13,6 +14,7 @@ pub mod features;
 pub mod folders;
 pub mod gif_anim;
 pub mod gifs;
+pub mod guild_admin;
 pub mod images;
 pub mod input;
 pub mod jump;
@@ -24,9 +26,11 @@ pub mod message;
 pub mod nitro;
 pub mod notify;
 pub mod panels;
+pub mod permissions;
 pub mod plugins;
 pub mod profile;
 pub mod rail;
+pub mod role_admin;
 pub mod search;
 pub mod servers;
 pub mod settings;
@@ -165,6 +169,12 @@ pub struct App {
     /// Channel-header popovers (bell, pins, inbox).
     pub panels: features::Panels,
     pub server_dialog: Option<servers::ServerDialog>,
+    /// Server administration dialogs and the Server Settings screen.
+    pub admin: guild_admin::Admin,
+    /// Create / edit / delete channel dialog.
+    pub channel_dialog: Option<channel_admin::ChannelDialog>,
+    /// Member roles / moderation dialog.
+    pub member_dialog: Option<role_admin::MemberDialog>,
     pub discover: Option<servers::DiscoverState>,
     /// Server rail interaction (folders, drag and drop, menus).
     pub rail: rail::RailUi,
@@ -314,6 +324,9 @@ impl App {
             search: search::SearchState::default(),
             panels: features::Panels::default(),
             server_dialog: None,
+            admin: guild_admin::Admin::default(),
+            channel_dialog: None,
+            member_dialog: None,
             discover: None,
             rail: rail::RailUi::default(),
             pending_select: None,
@@ -445,6 +458,11 @@ impl App {
     fn boot_mock(&mut self) {
         let ready = mock::ready();
         self.chat.load_ready(&ready);
+        // Game Night members (the mock user owns it): Alice plays.
+        self.chat.member_roles.insert(
+            (mock::GUILD_GAMES, Snowflake(2)),
+            vec![mock::ROLE_GAMES_PLAYERS],
+        );
         let me = ready.me.as_ref().map(|u| u.id);
         let _ = self.voice.apply(&Event::Ready(Box::new(ready.clone())), me);
         for c in ready.channels.iter().filter(|c| c.kind.is_textual()) {
@@ -889,6 +907,113 @@ impl App {
                 let _ = self.update_ui(Ui::SearchChanged("from:alice has:link".into()));
                 let _ = self.update_ui(Ui::SubmitSearch);
             }
+            S::ServerMenu | S::ServerSettings | S::ServerInvite | S::DeleteServer => {
+                // Game Night is owned by the mock user.
+                let g = mock::GUILD_GAMES;
+                self.view = View::Guild {
+                    guild: g,
+                    channel: self.chat.default_channel(g),
+                };
+                use guild_admin::{AdminDone, AdminUi};
+                match s {
+                    S::ServerMenu => {
+                        let _ = self.update_admin(AdminUi::ToggleMenu(g));
+                    }
+                    S::ServerInvite => {
+                        let _ = self.update_admin(AdminUi::OpenInvite(g));
+                        let _ = self.on_admin_done(AdminDone::Invite {
+                            guild: g,
+                            result: Ok("ferro-mock".into()),
+                        });
+                    }
+                    _ => {
+                        let _ = self.update_admin(AdminUi::OpenSettings(g));
+                        if s == S::ServerSettings {
+                            let _ =
+                                self.update_admin(AdminUi::NameChanged("Game Night LAN".into()));
+                        } else {
+                            let _ = self.update_admin(AdminUi::AskDelete);
+                            let _ = self.update_admin(AdminUi::DeleteTyped("Game Night".into()));
+                        }
+                    }
+                }
+            }
+            S::ChannelMenu | S::CreateChannel | S::EditChannel => {
+                let g = mock::GUILD_GAMES;
+                let help = Snowflake(412);
+                self.view = View::Guild {
+                    guild: g,
+                    channel: Some(Snowflake(411)),
+                };
+                use channel_admin::ChannelUi;
+                match s {
+                    S::ChannelMenu => {
+                        self.ctx_menu = Some(context::CtxMenu {
+                            target: context::CtxTarget::Channel(help),
+                            at: iced::Point::new(200.0, 150.0),
+                        });
+                    }
+                    S::CreateChannel => {
+                        let _ = self.update_channel_admin(ChannelUi::OpenCreate {
+                            guild: g,
+                            parent: Some(Snowflake(410)),
+                            category: false,
+                        });
+                        let _ =
+                            self.update_channel_admin(ChannelUi::CreateName("Game Plans".into()));
+                    }
+                    _ => {
+                        let _ = self.update_channel_admin(ChannelUi::OpenEdit(help));
+                        let _ = self.update_channel_admin(ChannelUi::EditTopic(
+                            "Stuck on a level? Ask here.".into(),
+                        ));
+                    }
+                }
+            }
+            S::ServerRoles | S::MemberMenu | S::MemberRoles | S::BanMember => {
+                let g = mock::GUILD_GAMES;
+                let alice = Snowflake(2);
+                self.view = View::Guild {
+                    guild: g,
+                    channel: self.chat.default_channel(g),
+                };
+                use role_admin::{ModKind, RoleUi};
+                match s {
+                    S::ServerRoles => {
+                        let _ = self.update_admin(guild_admin::AdminUi::OpenSettings(g));
+                        let _ = self.update_roles(RoleUi::Page(role_admin::SettingsPage::Roles));
+                        let _ = self.update_roles(RoleUi::Select(mock::ROLE_GAMES_MODS));
+                        let _ =
+                            self.update_roles(RoleUi::Permission(permissions::BAN_MEMBERS, true));
+                    }
+                    S::MemberMenu => {
+                        self.ctx_menu = Some(context::CtxMenu {
+                            target: context::CtxTarget::User {
+                                user: alice,
+                                guild: Some(g),
+                            },
+                            at: iced::Point::new(700.0, 150.0),
+                        });
+                    }
+                    S::MemberRoles => {
+                        let _ = self.update_roles(RoleUi::OpenMemberRoles {
+                            guild: g,
+                            user: alice,
+                        });
+                    }
+                    _ => {
+                        let _ = self.update_roles(RoleUi::OpenModeration {
+                            guild: g,
+                            user: alice,
+                            kind: ModKind::Ban,
+                        });
+                        let _ = self.update_roles(RoleUi::Reason("Spamming invites".into()));
+                    }
+                }
+            }
+            S::LeaveServer => {
+                let _ = self.update_admin(guild_admin::AdminUi::AskLeave(mock::GUILD_RUST));
+            }
             _ => {}
         }
     }
@@ -1148,6 +1273,9 @@ impl App {
             Ui::Logout => self.logout(),
             Ui::Voice(v) => self.update_voice(v),
             Ui::Settings(s) => self.update_settings(s),
+            Ui::Admin(a) => self.update_admin(a),
+            Ui::Channel(c) => self.update_channel_admin(c),
+            Ui::Roles(r) => self.update_roles(r),
             Ui::WindowFocus(f) => {
                 self.window_focused = f;
                 if f && let Some(c) = self.open_channel() {
@@ -1976,6 +2104,9 @@ impl App {
             Done::Invite { generation, result } => self.on_invite(generation, result),
             Done::Joined { generation, result } => self.on_joined(generation, result),
             Done::Created(r) => self.on_created(r),
+            Done::Admin(d) => self.on_admin_done(d),
+            Done::Channel(d) => self.on_channel_done(d),
+            Done::Roles(d) => self.on_roles_done(d),
             Done::IconPicked(r) => self.on_icon_picked(r),
             Done::DiscoverCategories(r) => {
                 if let (Some(d), Ok(c)) = (self.discover.as_mut(), r) {

@@ -945,3 +945,59 @@ fn guild_subscription_asks_for_activities() {
     let s = serde_json::to_value(&p).unwrap();
     assert_eq!(s["d"]["activities"], json!(true));
 }
+
+#[test]
+fn channel_overwrites_and_role_events() {
+    let Event::ChannelUpsert(c, _) = parse_dispatch(
+        "CHANNEL_UPDATE",
+        json!({
+            "id": "50", "type": 0, "guild_id": "10", "name": "staff",
+            "permission_overwrites": [
+                {"id": "10", "type": 0, "allow": "0", "deny": "1024"},
+                {"id": "20", "type": "role", "allow": "1024", "deny": "0"},
+                {"id": "1", "type": 1, "allow": "2048", "deny": "0"}
+            ]
+        }),
+    )
+    .unwrap()
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(c.overwrites.len(), 3);
+    assert_eq!(c.overwrites[0].deny, 1024);
+    assert!(!c.overwrites[1].member);
+    assert_eq!(c.overwrites[1].allow, 1024);
+    assert!(c.overwrites[2].member);
+
+    let Event::RoleUpsert { guild_id, role } = parse_dispatch(
+        "GUILD_ROLE_UPDATE",
+        json!({"guild_id": "10", "role": {"id": "20", "name": "Mods", "color": 5,
+               "position": 2, "permissions": "8192"}}),
+    )
+    .unwrap()
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(guild_id, sf("10"));
+    assert_eq!((role.name.as_str(), role.permissions), ("Mods", 8192));
+
+    assert!(matches!(
+        parse_dispatch(
+            "GUILD_ROLE_DELETE",
+            json!({"guild_id": "10", "role_id": "20"})
+        )
+        .unwrap()
+        .unwrap(),
+        Event::RoleDelete { role_id, .. } if role_id == sf("20")
+    ));
+
+    let Event::MemberRoles(list) = parse_dispatch(
+        "GUILD_MEMBER_UPDATE",
+        json!({"guild_id": "10", "roles": ["20"], "user": {"id": "1", "username": "me"}}),
+    )
+    .unwrap()
+    .unwrap() else {
+        panic!()
+    };
+    assert_eq!(list, vec![(sf("10"), sf("1"), vec![sf("20")])]);
+}

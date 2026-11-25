@@ -194,6 +194,20 @@ pub struct Channel {
     /// DM / group DM participants (excluding the current user).
     pub recipients: Vec<UserId>,
     pub nsfw: bool,
+    /// Permission overwrites (server channels only).
+    #[serde(default)]
+    pub overwrites: Vec<PermissionOverwrite>,
+}
+
+/// One channel permission overwrite: a role (or `@everyone`, whose id is
+/// the guild id) or a single member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionOverwrite {
+    pub id: Snowflake,
+    /// `true` = a member, `false` = a role.
+    pub member: bool,
+    pub allow: u64,
+    pub deny: u64,
 }
 
 impl Channel {

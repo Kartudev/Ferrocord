@@ -289,6 +289,37 @@ pub struct WireChannel {
     pub recipient_ids: Vec<Snowflake>,
     #[serde(default)]
     pub nsfw: bool,
+    #[serde(default)]
+    pub permission_overwrites: Vec<WireOverwrite>,
+}
+
+/// `permission_overwrites[]` entry. `type` is 0/1 (older payloads:
+/// `"role"`/`"member"`); `allow`/`deny` are decimal strings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireOverwrite {
+    pub id: Snowflake,
+    #[serde(rename = "type", default)]
+    pub kind: serde_json::Value,
+    #[serde(default, deserialize_with = "de_permissions")]
+    pub allow: u64,
+    #[serde(default, deserialize_with = "de_permissions")]
+    pub deny: u64,
+}
+
+impl From<WireOverwrite> for PermissionOverwrite {
+    fn from(w: WireOverwrite) -> Self {
+        let member = match &w.kind {
+            serde_json::Value::Number(n) => n.as_u64() == Some(1),
+            serde_json::Value::String(s) => s == "member" || s == "1",
+            _ => false,
+        };
+        Self {
+            id: w.id,
+            member,
+            allow: w.allow,
+            deny: w.deny,
+        }
+    }
 }
 
 impl WireChannel {
@@ -314,6 +345,12 @@ impl WireChannel {
                 last_message_id: self.last_message_id.filter(|s| s.0 != 0),
                 recipients,
                 nsfw: self.nsfw,
+                overwrites: self
+                    .permission_overwrites
+                    .into_iter()
+                    .take(1000)
+                    .map(Into::into)
+                    .collect(),
             },
             users,
         )
@@ -331,6 +368,42 @@ pub struct WireRole {
     pub position: i32,
     #[serde(default, deserialize_with = "de_permissions")]
     pub permissions: u64,
+}
+
+impl From<WireRole> for Role {
+    fn from(r: WireRole) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            color: r.color,
+            position: r.position,
+            permissions: r.permissions,
+        }
+    }
+}
+
+/// GUILD_ROLE_CREATE / GUILD_ROLE_UPDATE payload.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireRoleEvent {
+    pub guild_id: Snowflake,
+    pub role: WireRole,
+}
+
+/// GUILD_ROLE_DELETE payload.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireRoleDelete {
+    pub guild_id: Snowflake,
+    pub role_id: Snowflake,
+}
+
+/// GUILD_MEMBER_UPDATE payload (only the parts we keep).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireMemberUpdate {
+    pub guild_id: Snowflake,
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
+    #[serde(default)]
+    pub user: Option<WireUser>,
 }
 
 /// Permission bits arrive as a decimal string (older payloads: a number).
@@ -432,17 +505,7 @@ impl WireGuild {
             id: self.id,
             name: self.name.or(props.name).unwrap_or_default(),
             icon: self.icon.or(props.icon),
-            roles: self
-                .roles
-                .into_iter()
-                .map(|r| Role {
-                    id: r.id,
-                    name: r.name,
-                    color: r.color,
-                    position: r.position,
-                    permissions: r.permissions,
-                })
-                .collect(),
+            roles: self.roles.into_iter().map(Into::into).collect(),
             owner_id: self.owner_id.or(props.owner_id),
             emojis: self.emojis,
             stickers: self.stickers.into_iter().map(Into::into).collect(),
@@ -1647,6 +1710,27 @@ pub fn parse_dispatch(t: &str, d: Value) -> Result<Option<Event>, serde_json::Er
                 status: Presence::from_wire(&p.status),
                 activities: super::cosmetics::parse_activities(&p.activities),
             }
+        }
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            let r: WireRoleEvent = serde_json::from_value(d)?;
+            Event::RoleUpsert {
+                guild_id: r.guild_id,
+                role: r.role.into(),
+            }
+        }
+        "GUILD_ROLE_DELETE" => {
+            let r: WireRoleDelete = serde_json::from_value(d)?;
+            Event::RoleDelete {
+                guild_id: r.guild_id,
+                role_id: r.role_id,
+            }
+        }
+        "GUILD_MEMBER_UPDATE" => {
+            let m: WireMemberUpdate = serde_json::from_value(d)?;
+            let Some(u) = m.user else {
+                return Ok(None);
+            };
+            Event::MemberRoles(vec![(m.guild_id, u.id, m.roles)])
         }
         "GUILD_MEMBER_LIST_UPDATE" => {
             let u: WireMemberListUpdate = serde_json::from_value(d)?;

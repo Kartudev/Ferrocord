@@ -43,6 +43,7 @@ pub enum Icon {
     WifiOff,
     X,
     ArrowDown,
+    ArrowUp,
     Check,
     Copy,
     Ellipsis,
@@ -74,7 +75,7 @@ pub enum Icon {
     StarFilled,
 }
 
-const ALL: [(Icon, &[u8]); 64] = [
+const ALL: [(Icon, &[u8]); 65] = [
     (
         Icon::AtSign,
         include_bytes!("../../assets/icons/at-sign.svg"),
@@ -175,6 +176,10 @@ const ALL: [(Icon, &[u8]); 64] = [
     (
         Icon::ArrowDown,
         include_bytes!("../../assets/icons/arrow-down.svg"),
+    ),
+    (
+        Icon::ArrowUp,
+        include_bytes!("../../assets/icons/arrow-up.svg"),
     ),
     (Icon::Check, include_bytes!("../../assets/icons/check.svg")),
     (Icon::Copy, include_bytes!("../../assets/icons/copy.svg")),

@@ -6,6 +6,8 @@ use crate::net::Event;
 use crate::net::extras::ChannelNotify;
 use crate::net::model::*;
 
+use super::permissions;
+
 /// Messages kept in memory for the open conversation.
 pub const MESSAGE_WINDOW: usize = 200;
 /// Hard cap while the user scrolls back through history.
@@ -305,32 +307,105 @@ impl ChatState {
         }
     }
 
-    /// Whether the current user may pin and unpin in `c`: always in DMs; in
-    /// servers for the owner, administrators and roles with Manage
-    /// Messages. Channel overwrites are not applied, so a 403 from the
-    /// server is still possible and is reported when it happens.
-    pub fn can_manage_messages(&self, c: ChannelId) -> bool {
-        const ADMINISTRATOR: u64 = 1 << 3;
-        const MANAGE_MESSAGES: u64 = 1 << 13;
+    /// Server-wide permission bits of the current user in `g` (0 when
+    /// the server is unknown).
+    pub fn guild_permissions(&self, g: GuildId) -> u64 {
+        let Some(guild) = self.guild(g) else {
+            return 0;
+        };
+        let mine = self.my_roles.get(&g).map(Vec::as_slice).unwrap_or(&[]);
+        permissions::base(guild, self.me_id(), mine)
+    }
+
+    /// Whether the current user has `bit` server-wide in `g`.
+    pub fn can_in_guild(&self, g: GuildId, bit: u64) -> bool {
+        self.guild_permissions(g) & bit != 0
+    }
+
+    /// Permission bits of the current user in `c`, overwrites applied
+    /// (threads use their parent's). Everything in DMs; 0 when the channel
+    /// or its server is unknown.
+    pub fn channel_permissions(&self, c: ChannelId) -> u64 {
+        let Some(ch) = self.channels.get(&c) else {
+            return 0;
+        };
+        let Some(g) = ch.guild_id else {
+            return permissions::ALL;
+        };
+        self.channel_bits(g, self.guild_permissions(g), ch)
+    }
+
+    /// `ch`'s bits given the server-wide `base` of its server `g`.
+    fn channel_bits(&self, g: GuildId, base: u64, ch: &Channel) -> u64 {
+        let ch = match ch.kind {
+            ChannelKind::Thread => ch
+                .parent_id
+                .and_then(|p| self.channels.get(&p))
+                .unwrap_or(ch),
+            _ => ch,
+        };
+        let mine = self.my_roles.get(&g).map(Vec::as_slice).unwrap_or(&[]);
+        permissions::in_channel(base, g, self.me_id(), mine, &ch.overwrites)
+    }
+
+    /// Visibility filter for one server's channels: `None` when the
+    /// permissions are not known (everything is shown), else the server-wide
+    /// bits to apply each channel's overwrites to.
+    fn view_base(&self, g: GuildId) -> Option<u64> {
+        let guild = self.guild(g)?;
+        permissions::known(guild).then(|| self.guild_permissions(g))
+    }
+
+    fn visible_with(&self, g: GuildId, base: Option<u64>, ch: &Channel) -> bool {
+        base.is_none_or(|b| self.channel_bits(g, b, ch) & permissions::VIEW_CHANNEL != 0)
+    }
+
+    /// Whether the current user can see `c` (View Channel). DMs and
+    /// channels of servers whose roles are not known count as visible.
+    pub fn can_view(&self, c: ChannelId) -> bool {
         let Some(ch) = self.channels.get(&c) else {
             return false;
         };
-        let Some(g) = ch.guild_id else {
-            return true;
-        };
-        let Some(guild) = self.guild(g) else {
-            return false;
-        };
-        if guild.owner_id.is_some() && guild.owner_id == self.me_id() {
-            return true;
+        match ch.guild_id {
+            Some(g) => self.visible_with(g, self.view_base(g), ch),
+            None => true,
         }
-        let mine = self.my_roles.get(&g);
-        let bits = guild
-            .roles
-            .iter()
-            .filter(|r| r.id == g || mine.is_some_and(|m| m.contains(&r.id)))
-            .fold(0, |acc, r| acc | r.permissions);
-        bits & (ADMINISTRATOR | MANAGE_MESSAGES) != 0
+    }
+
+    /// Whether the current user may pin, unpin and suppress embeds in `c`:
+    /// always in DMs; in servers with Manage Messages there (owner,
+    /// Administrator, roles, channel overwrites).
+    pub fn can_manage_messages(&self, c: ChannelId) -> bool {
+        self.channel_permissions(c) & permissions::MANAGE_MESSAGES != 0
+    }
+
+    /// A channel of `g` where the current user may create an invite: `pref`
+    /// when allowed there, else the first one in list order.
+    pub fn invite_channel(&self, g: GuildId, pref: Option<ChannelId>) -> Option<ChannelId> {
+        let ok = |c: &Channel| {
+            c.guild_id == Some(g)
+                && c.kind != ChannelKind::Category
+                && c.kind != ChannelKind::Thread
+                && self.channel_permissions(c.id)
+                    & (permissions::CREATE_INSTANT_INVITE | permissions::VIEW_CHANNEL)
+                    == permissions::CREATE_INSTANT_INVITE | permissions::VIEW_CHANNEL
+        };
+        if let Some(c) = pref.and_then(|c| self.channels.get(&c))
+            && ok(c)
+        {
+            return Some(c.id);
+        }
+        self.channel_tree(g)
+            .into_iter()
+            .flat_map(|(_, kids)| kids)
+            .find(|c| ok(c))
+            .map(|c| c.id)
+    }
+
+    /// Whether the current user owns `g`.
+    pub fn owns_guild(&self, g: GuildId) -> bool {
+        let me = self.me_id();
+        me.is_some() && self.guild(g).is_some_and(|guild| guild.owner_id == me)
     }
 
     /// Applies one gateway event. Returns effects for the app to run.
@@ -427,6 +502,27 @@ impl ChatState {
                 self.folders
                     .sync(&self.guilds.iter().map(|g| g.id).collect::<Vec<_>>());
                 self.resort_guilds();
+            }
+            Event::RoleUpsert { guild_id, role } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == *guild_id) {
+                    match g.roles.iter_mut().find(|r| r.id == role.id) {
+                        Some(r) => *r = role.clone(),
+                        None => g.roles.push(role.clone()),
+                    }
+                }
+            }
+            Event::RoleDelete { guild_id, role_id } => {
+                if let Some(g) = self.guilds.iter_mut().find(|g| g.id == *guild_id) {
+                    g.roles.retain(|r| r.id != *role_id);
+                }
+                if let Some(mine) = self.my_roles.get_mut(guild_id) {
+                    mine.retain(|r| r != role_id);
+                }
+                for ((g, _), roles) in self.member_roles.iter_mut() {
+                    if g == guild_id {
+                        roles.retain(|r| r != role_id);
+                    }
+                }
             }
             Event::GuildFolders(list) => {
                 self.folders = super::folders::Folders::from_settings(list, &[]);
@@ -1003,8 +1099,9 @@ impl ChatState {
     pub fn guild_badge(&self, g: GuildId) -> Badge {
         let muted_guild = self.muted_guilds.contains(&g);
         let mut b = Badge::default();
+        let base = self.view_base(g);
         for c in self.channels.values().filter(|c| c.guild_id == Some(g)) {
-            if !c.kind.is_textual() {
+            if !c.kind.is_textual() || !self.visible_with(g, base, c) {
                 continue;
             }
             b.mentions += self.mention_count(c.id);
@@ -1068,6 +1165,7 @@ impl ChatState {
     /// category with its children, all sorted like the official client
     /// (text before voice, then position, then id).
     pub fn channel_tree(&self, g: GuildId) -> Vec<(Option<&Channel>, Vec<&Channel>)> {
+        let base = self.view_base(g);
         let in_guild: Vec<&Channel> = self
             .channels
             .values()
@@ -1089,6 +1187,7 @@ impl ChatState {
             .filter(|c| {
                 c.kind != ChannelKind::Category
                     && c.parent_id.is_none_or(|p| !cats.iter().any(|k| k.id == p))
+                    && self.visible_with(g, base, c)
             })
             .collect();
         top.sort_by_key(sort_key);
@@ -1098,7 +1197,13 @@ impl ChatState {
                 .iter()
                 .copied()
                 .filter(|c| c.parent_id == Some(cat.id) && c.kind != ChannelKind::Category)
+                .filter(|c| self.visible_with(g, base, c))
                 .collect();
+            // Like the official client: a category shows while it holds a
+            // visible channel or can be seen itself.
+            if kids.is_empty() && !self.visible_with(g, base, cat) {
+                continue;
+            }
             kids.sort_by_key(sort_key);
             out.push((Some(cat), kids));
         }
@@ -1762,6 +1867,7 @@ mod tests {
             last_message_id: None,
             recipients: vec![],
             nsfw: false,
+            overwrites: vec![],
         };
         s.apply_event(
             &Event::GuildUpsert {
@@ -1885,5 +1991,116 @@ mod tests {
             &ctx(),
         );
         assert_eq!(s.guilds.first().map(|g| g.id), Some(mock::GUILD_GAMES));
+    }
+
+    #[test]
+    fn hidden_channels_are_filtered_by_permissions() {
+        use super::permissions::{MANAGE_MESSAGES, VIEW_CHANNEL};
+        let mut s = loaded();
+        let g = mock::GUILD_GAMES;
+        // The mock user owns Game Night; no @everyone role is known there,
+        // so everything is visible.
+        assert!(s.owns_guild(g));
+        assert_eq!(
+            s.channel_tree(g)
+                .iter()
+                .map(|(_, k)| k.len())
+                .sum::<usize>(),
+            3
+        );
+        // Another owner, @everyone without View Channel, one channel shown
+        // to a role the user has.
+        let me = s.me_id();
+        let role = Snowflake(4900);
+        if let Some(guild) = s.guilds.iter_mut().find(|x| x.id == g) {
+            guild.owner_id = Some(Snowflake(3));
+            guild.roles = vec![
+                Role {
+                    id: g,
+                    name: "@everyone".into(),
+                    color: 0,
+                    position: 0,
+                    permissions: 0,
+                },
+                Role {
+                    id: role,
+                    name: "Players".into(),
+                    color: 0,
+                    position: 1,
+                    permissions: 0,
+                },
+            ];
+        }
+        s.my_roles.insert(g, vec![role]);
+        let shown = Snowflake(412);
+        if let Some(c) = s.channels.get_mut(&shown) {
+            c.overwrites = vec![PermissionOverwrite {
+                id: role,
+                member: false,
+                allow: VIEW_CHANNEL | MANAGE_MESSAGES,
+                deny: 0,
+            }];
+        }
+        let tree = s.channel_tree(g);
+        let ids: Vec<ChannelId> = tree
+            .iter()
+            .flat_map(|(_, k)| k.iter().map(|c| c.id))
+            .collect();
+        assert_eq!(ids, vec![shown]);
+        // The category holds a visible channel, so it stays.
+        assert!(tree.iter().any(|(c, _)| c.is_some()));
+        assert!(s.can_view(shown));
+        assert!(!s.can_view(Snowflake(411)));
+        assert!(s.can_manage_messages(shown));
+        assert!(!s.can_manage_messages(Snowflake(411)));
+        // Hidden channels do not light the server up.
+        s.read_states.insert(
+            Snowflake(411),
+            ReadState {
+                last_read: None,
+                mention_count: 4,
+            },
+        );
+        assert_eq!(s.guild_badge(g).mentions, 0);
+        // A member overwrite denying it hides it again.
+        if let (Some(c), Some(me)) = (s.channels.get_mut(&shown), me) {
+            c.overwrites.push(PermissionOverwrite {
+                id: me,
+                member: true,
+                allow: 0,
+                deny: VIEW_CHANNEL,
+            });
+        }
+        assert!(
+            s.channel_tree(g)
+                .iter()
+                .all(|(c, k)| c.is_none() && k.is_empty())
+        );
+        // Role events keep the roles current.
+        s.apply_event(
+            &Event::RoleDelete {
+                guild_id: g,
+                role_id: role,
+            },
+            &Ctx::default(),
+        );
+        assert!(s.my_roles[&g].is_empty());
+        assert_eq!(s.guild(g).map(|x| x.roles.len()), Some(1));
+        s.apply_event(
+            &Event::RoleUpsert {
+                guild_id: g,
+                role: Role {
+                    id: g,
+                    name: "@everyone".into(),
+                    color: 0,
+                    position: 0,
+                    permissions: VIEW_CHANNEL,
+                },
+            },
+            &Ctx::default(),
+        );
+        assert_eq!(s.guild_permissions(g), VIEW_CHANNEL);
+        assert!(s.can_view(Snowflake(411)));
+        assert_eq!(s.invite_channel(g, None), None);
     }
 }

@@ -9,6 +9,8 @@ use super::icons::{Icon, icon};
 use super::theme::{self, INTER, INTER_MEDIUM, INTER_SEMIBOLD};
 use super::{El, avatar_with_presence, avatar_with_status, initials_circle, mention_badge, ui};
 use crate::app::anim::{Hover, Zone};
+use crate::app::context::{CtxMenu, CtxTarget};
+use crate::app::guild_admin::AdminUi;
 use crate::app::{App, Message, Ui, View};
 use crate::net::model::*;
 
@@ -51,13 +53,32 @@ fn guild_header(app: &App, g: GuildId) -> El<'_> {
         .guild(g)
         .map(|g| g.name.clone())
         .unwrap_or_default();
-    row![
-        container(emoji_text(name, 16.0, p.header_text, INTER_SEMIBOLD, false)).width(Length::Fill),
-        icon(Icon::ChevronDown, 18.0, p.text_normal),
-    ]
+    // The chevron turns into an X while the dropdown is open.
+    let open = matches!(
+        app.ctx_menu,
+        Some(CtxMenu {
+            target: CtxTarget::Guild(x),
+            ..
+        }) if x == g
+    );
+    button(
+        row![
+            container(emoji_text(name, 16.0, p.header_text, INTER_SEMIBOLD, false))
+                .width(Length::Fill),
+            icon(
+                if open { Icon::X } else { Icon::ChevronDown },
+                18.0,
+                p.text_normal
+            ),
+        ]
+        .height(Length::Fill)
+        .align_y(Alignment::Center),
+    )
     .padding(Padding::from([0, 16]))
+    .width(Length::Fill)
     .height(Length::Fill)
-    .align_y(Alignment::Center)
+    .on_press(ui(Ui::Admin(AdminUi::ToggleMenu(g))))
+    .style(theme::list_row(p, open))
     .into()
 }
 
@@ -191,6 +212,32 @@ fn guild_channels(app: &App, g: GuildId, open: Option<ChannelId>) -> El<'_> {
             .width(Length::Fill)
             .on_press(ui(Ui::ToggleCategory(cat.id)))
             .style(theme::link_button(p));
+            let header = iced::widget::mouse_area(header).on_right_press(ui(Ui::ContextOpen(
+                crate::app::context::CtxTarget::Channel(cat.id),
+            )));
+            // "+" (Create Channel in this category) for channel managers.
+            let header: El<'_> = if app.can_manage_channels(g) {
+                row![
+                    header,
+                    container(
+                        button(icon(Icon::Plus, 14.0, p.text_muted))
+                            .padding(2)
+                            .on_press(ui(Ui::Channel(
+                                crate::app::channel_admin::ChannelUi::OpenCreate {
+                                    guild: g,
+                                    parent: Some(cat.id),
+                                    category: false,
+                                }
+                            )))
+                            .style(theme::icon_button(p))
+                    )
+                    .padding(Padding::ZERO.top(14).right(8)),
+                ]
+                .align_y(Alignment::Center)
+                .into()
+            } else {
+                header.into()
+            };
             col = col.push(header);
             for c in kids {
                 let selected = open == Some(c.id);
