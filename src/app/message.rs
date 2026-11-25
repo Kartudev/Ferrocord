@@ -21,6 +21,9 @@ use crate::net::rest::UploadFile;
 pub enum Message {
     Ui(Ui),
     Net(net::Event),
+    /// A gateway event, tagged with the generation of the connection
+    /// that produced it (stale ones are dropped after a switch / logout).
+    Gateway(u64, net::Event),
     Done(Done),
     /// Events from the system tray service.
     Tray(crate::tray::Event),
@@ -75,6 +78,11 @@ pub enum Ui {
     /// The "X" on a message's embeds: sets `SUPPRESS_EMBEDS` on the message.
     SuppressEmbeds(MessageId),
     Logout,
+    // -- account switcher
+    SwitchAccount(UserId),
+    /// Back to the login screen; the current account stays saved.
+    AddAccount,
+    RemoveAccount(UserId),
     WindowFocus(bool),
     WindowOpened,
     Tick,
@@ -268,6 +276,13 @@ pub enum Done {
     TokenValidated {
         result: Result<User, String>,
         revoked: bool,
+        /// `App::validation_generation` when it started.
+        generation: u64,
+    },
+    /// A saved account's token read for a switch.
+    AccountToken {
+        id: UserId,
+        result: Result<Option<crate::auth::secrets::Secret>, String>,
     },
     TokenSaved(Result<(), String>),
     Qr(RaEvent),

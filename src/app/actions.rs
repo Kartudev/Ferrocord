@@ -453,6 +453,10 @@ impl App {
             }
             Ui::ToggleStatusMenu => {
                 self.status_menu = !self.status_menu;
+                if self.status_menu && self.accounts.len() > 1 {
+                    // The switcher's avatars.
+                    return self.request_images();
+                }
                 Task::none()
             }
             Ui::SetStatus(p) => self.set_status(p),

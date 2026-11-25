@@ -9,7 +9,7 @@ Video (camera / Go Live) is not implemented yet: see `docs/voice.md` §6.
 
 ## Commands
 - `cargo run -- --mock` — run with mock data (no network, in-memory stores).
-- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner> out.png` — render a screen to PNG
+- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|login-accounts|accounts|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner> out.png` — render a screen to PNG
   (headless: `ICED_BACKEND=tiny-skia xvfb-run -a -s "-screen 0 1280x800x24" ...`).
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `cargo build --release`. `ferrocord --version` / `-V` (also `ferrocord-player`, `ferrocord-login`).
@@ -77,6 +77,10 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
   their own row is hovered (`App::list_phase`, `anim::Hover` + `Zone`), like the official client;
   only the profile popout plays them unhovered. Never make list cosmetics play unhovered: each
   costs 60 window redraws/s.
+- Accounts (`auth/accounts.rs`, `app/accounts.rs`): switching is in place, no restart. Tokens: active one under keyring
+  `session`, each saved account under `account.<id>`; the list (no tokens) in `meta("pref.accounts")`, max 5. Every
+  account-bound field must be reset in `App::reset_session`; gateway events come as `Message::Gateway(generation, ..)`
+  and stale generations (and stale `TokenValidated`) are dropped, so an old account's late event never lands in the new one.
 - Composer is a `text_editor` (`app/composer.rs`): Enter sends, Shift+Enter newline; cursor columns are bytes. Container `shadow` is safe with ferroiced (tiny-skia clips it to the damage region), but
   the house style keeps the gradient header and sets no shadow (`ui/theme.rs` guard test).
 - Video helper (`ferrocord-player`): MP4/MOV is read by our own `mp4.rs` (progressive + fragmented `moof`, QuickTime);

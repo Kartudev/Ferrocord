@@ -94,6 +94,10 @@ pub enum ScreenshotScreen {
     StickersLocked,
     /// The "new version available" banner.
     UpdateBanner,
+    /// The status menu with the account switcher open.
+    Accounts,
+    /// The login screen with saved accounts to pick from.
+    LoginAccounts,
 }
 
 impl ScreenshotScreen {
@@ -126,6 +130,8 @@ impl ScreenshotScreen {
             "login-captcha" => Some(Self::LoginCaptcha),
             "login-web" => Some(Self::LoginWeb),
             "login-web-failed" => Some(Self::LoginWebFailed),
+            "login-accounts" => Some(Self::LoginAccounts),
+            "accounts" | "switch-accounts" => Some(Self::Accounts),
             "guild" | "server" | "members" => Some(Self::Guild),
             "dms" | "dm" => Some(Self::Dms),
             "embeds" | "attachments" => Some(Self::Embeds),

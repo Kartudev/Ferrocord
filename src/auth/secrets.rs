@@ -152,6 +152,52 @@ pub async fn clear_token(store: Arc<dyn SecretStore>) -> Result<()> {
         .map_err(|_| Error::Cancelled)?
 }
 
+/// Token of one saved account (account switcher).
+pub async fn load_account_token(
+    store: Arc<dyn SecretStore>,
+    id: crate::net::model::UserId,
+) -> Result<Option<Secret>> {
+    let key = super::accounts::token_key(id);
+    tokio::task::spawn_blocking(move || store.get(&key))
+        .await
+        .map_err(|_| Error::Cancelled)?
+}
+
+/// Saves the active token (`session`) and, with `id`, the same token as
+/// that saved account's.
+pub async fn save_session(
+    store: Arc<dyn SecretStore>,
+    token: Secret,
+    id: Option<crate::net::model::UserId>,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        store.set(TOKEN_KEY, &token)?;
+        match id {
+            Some(id) => store.set(&super::accounts::token_key(id), &token),
+            None => Ok(()),
+        }
+    })
+    .await
+    .map_err(|_| Error::Cancelled)?
+}
+
+/// Forgets a saved account's token; with `active`, the `session` entry too.
+pub async fn forget_account(
+    store: Arc<dyn SecretStore>,
+    id: crate::net::model::UserId,
+    active: bool,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        store.delete(&super::accounts::token_key(id))?;
+        if active {
+            store.delete(TOKEN_KEY)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| Error::Cancelled)?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +230,48 @@ mod tests {
         );
         clear_token(store.clone()).await.unwrap();
         assert!(load_token(store).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn account_tokens_are_separate_from_the_session() {
+        use crate::net::model::Snowflake;
+        let store: Arc<dyn SecretStore> = Arc::new(MemoryStore::new());
+        save_session(store.clone(), Secret::new("a.a.a"), Some(Snowflake(1)))
+            .await
+            .unwrap();
+        save_session(store.clone(), Secret::new("b.b.b"), Some(Snowflake(2)))
+            .await
+            .unwrap();
+        // The last login is the active session; both accounts keep theirs.
+        assert_eq!(
+            load_token(store.clone()).await.unwrap().unwrap().expose(),
+            "b.b.b"
+        );
+        let a = load_account_token(store.clone(), Snowflake(1))
+            .await
+            .unwrap();
+        assert_eq!(a.unwrap().expose(), "a.a.a");
+        // Removing an inactive account leaves the session alone.
+        forget_account(store.clone(), Snowflake(1), false)
+            .await
+            .unwrap();
+        assert!(
+            load_account_token(store.clone(), Snowflake(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(load_token(store.clone()).await.unwrap().is_some());
+        // Removing the active one logs it out.
+        forget_account(store.clone(), Snowflake(2), true)
+            .await
+            .unwrap();
+        assert!(load_token(store.clone()).await.unwrap().is_none());
+        assert!(
+            load_account_token(store, Snowflake(2))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Login flows (QR, Discord's login page, token) and the authentication
 //! state machine.
 
+pub mod accounts;
 pub mod secrets;
 pub mod web_login;
 

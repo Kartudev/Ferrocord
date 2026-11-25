@@ -50,12 +50,31 @@ pub fn view(app: &App) -> El<'_> {
             .color(p.text_secondary)
             .width(Length::Fill)
             .align_x(Alignment::Center),
-        Space::new().height(12),
-        label,
-        input,
     ]
     .spacing(8)
     .width(Length::Fill);
+    if !app.accounts.is_empty() && !validating {
+        // Saved accounts (account switcher): one click logs back in.
+        let mut saved = column![
+            text("CHOOSE AN ACCOUNT")
+                .size(12)
+                .font(INTER_BOLD)
+                .color(p.text_secondary)
+        ]
+        .spacing(4);
+        for a in &app.accounts.list {
+            saved = saved.push(super::popups::account_row(app, a, 32.0));
+        }
+        left = left.push(Space::new().height(8)).push(saved);
+        left = left.push(
+            text("Or log in to another account:")
+                .size(12)
+                .color(p.text_muted),
+        );
+    } else {
+        left = left.push(Space::new().height(12));
+    }
+    left = left.push(label).push(input);
     if let Some(e) = error {
         left = left.push(text(e).size(12).color(p.danger));
     }

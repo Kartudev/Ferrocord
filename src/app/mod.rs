@@ -1,6 +1,7 @@
 //! Application state and update loop (the "Elm" side). No direct I/O:
 //! everything that touches the network, disk or keyring runs in a `Task`.
 
+pub mod accounts;
 pub mod actions;
 pub mod anim;
 mod background;
@@ -112,6 +113,12 @@ pub struct App {
     pub web_login: Option<WebLoginState>,
     web_login_generation: u64,
     gateway_generation: u64,
+    /// Bumped per token validation; a result of an older one is dropped.
+    validation_generation: u64,
+    /// Saved accounts (account switcher).
+    pub accounts: crate::auth::accounts::Accounts,
+    /// The account whose token is in use.
+    pub active_account: Option<UserId>,
     pub connection: ConnectionState,
     pub chat: ChatState,
     pub view: View,
@@ -272,6 +279,9 @@ impl App {
             web_login: None,
             web_login_generation: 0,
             gateway_generation: 0,
+            validation_generation: 0,
+            accounts: Default::default(),
+            active_account: None,
             connection: ConnectionState::Disconnected,
             chat: ChatState::default(),
             view: View::Home(None),
@@ -350,6 +360,7 @@ impl App {
             cfg,
         };
         app.window_focused = app.win.visible;
+        app.load_accounts();
         // "Play GIFs automatically" is synced; the local copy holds until
         // Discord's value arrives.
         app.settings.synced.seed(
@@ -442,7 +453,21 @@ impl App {
         )
     }
 
+    /// Mock "switch": the mock data again, signed in as `user`.
+    fn boot_mock_as(&mut self, user: User) {
+        self.boot_mock();
+        self.active_account = Some(user.id);
+        self.chat.me = Some(user.clone());
+        self.auth = AuthState::LoggedIn { user };
+    }
+
     fn boot_mock(&mut self) {
+        if self.accounts.is_empty() {
+            for u in mock::saved_accounts() {
+                self.accounts.upsert(&u);
+            }
+        }
+        self.active_account = Some(mock::user(1).id);
         let ready = mock::ready();
         self.chat.load_ready(&ready);
         let me = ready.me.as_ref().map(|u| u.id);
@@ -577,6 +602,11 @@ impl App {
                 self.auth = AuthState::LoggedOut { error: None };
                 self.qr = Some(qr_ready("https://discord.com/ra/mock-fingerprint-not-real"));
                 self.web_login = Some(WebLoginState::Open(WebLoginReason::Chosen));
+            }
+            Some(ScreenshotScreen::LoginAccounts) => {
+                self.auth = AuthState::LoggedOut { error: None };
+                self.active_account = None;
+                self.qr = Some(qr_ready("https://discord.com/ra/mock-fingerprint-not-real"));
             }
             Some(ScreenshotScreen::LoginWebFailed) => {
                 self.auth = AuthState::LoggedOut { error: None };
@@ -759,6 +789,7 @@ impl App {
             Some(ScreenshotScreen::Settings | ScreenshotScreen::SettingsPage(_))
         );
         self.mock_settings(screen);
+        self.status_menu = screen == Some(ScreenshotScreen::Accounts);
         self.mock_update_screen(screen);
         self.mock_plugin_screen(screen);
         let _ = self.sync_members();
@@ -945,6 +976,13 @@ impl App {
         let task = match msg {
             Message::Ui(u) => self.update_ui(u),
             Message::Net(ev) => self.on_net(ev),
+            Message::Gateway(generation, ev) => {
+                if generation == self.gateway_generation {
+                    self.on_net(ev)
+                } else {
+                    Task::none()
+                }
+            }
             Message::Done(d) => self.on_done(d),
             Message::Tray(ev) => self.on_tray(ev),
             Message::Voice(ev) => self.on_voice_event(ev),
@@ -1146,6 +1184,9 @@ impl App {
                 Task::perform(open_url(url), |_| Message::Done(Done::Ignored))
             }
             Ui::Logout => self.logout(),
+            Ui::SwitchAccount(id) => self.switch_account(id),
+            Ui::AddAccount => self.add_account(),
+            Ui::RemoveAccount(id) => self.remove_account(id),
             Ui::Voice(v) => self.update_voice(v),
             Ui::Settings(s) => self.update_settings(s),
             Ui::WindowFocus(f) => {
@@ -1452,11 +1493,14 @@ impl App {
     fn validate_token(&mut self, token: Secret) -> Task<Message> {
         let rest = self.rest.with_token(token.clone());
         self.token = Some(token);
-        Task::perform(async move { rest.me().await }, |r| {
+        self.validation_generation += 1;
+        let generation = self.validation_generation;
+        Task::perform(async move { rest.me().await }, move |r| {
             let revoked = r.as_ref().err().is_some_and(|e| e.is_session_revoked());
             Message::Done(Done::TokenValidated {
                 result: r.map_err(|e| e.user_message()),
                 revoked,
+                generation,
             })
         })
     }
@@ -1469,36 +1513,18 @@ impl App {
     }
 
     fn logout(&mut self) -> Task<Message> {
-        self.settings_open = false;
-        // Account settings belong to the account; local ones stay.
-        self.settings = settings::SettingsState::new(self.settings.local.clone());
-        self.gateway.set_custom_status(None);
-        self.apply_settings();
-        let me = self.chat.me_id();
-        let _ = self.voice.leave(me);
-        self.voice = voice::Voice::with_prefs(self.voice.prefs.clone());
-        self.token = None;
-        self.gateway_generation += 1;
+        // The cached `me` covers a revoke before validation finished.
+        let id = self.active_account.or(self.chat.me_id());
+        let reset = self.reset_session();
         self.auth = self.auth.apply(AuthEvent::LoggedOut);
-        self.connection = ConnectionState::Disconnected;
-        self.chat = ChatState::default();
-        self.view = View::Home(None);
-        self.qr = None;
-        self.web_login = None;
-        if self.cfg.mock {
-            return Task::none();
-        }
-        if let Ok(r) = RestClient::new(&self.cfg.api_url, &self.cfg.cdn_url, None) {
-            self.rest = r;
-        }
-        let s = self.secrets.clone();
-        let store = self.store.clone();
-        Task::batch([
-            Task::perform(secrets::clear_token(s), |_| Message::Done(Done::Ignored)),
-            Task::perform(async move { store.blocking(|s| s.clear()).await }, |_| {
-                Message::Done(Done::Ignored)
-            }),
-        ])
+        let forget = self.forget_active_account(id);
+        let login = if self.accounts.is_empty() {
+            Task::none()
+        } else {
+            // Show the saved accounts' avatars on the login screen.
+            self.request_images()
+        };
+        Task::batch([reset, forget, login])
     }
 
     // -- network events ---------------------------------------------------------
@@ -1518,6 +1544,7 @@ impl App {
                 self.session_id.clone_from(&r.session_id);
                 if let Some(me) = &r.me {
                     self.auth = self.auth.apply(AuthEvent::Validated(me.clone()));
+                    tasks.push(self.refresh_account(me));
                 }
                 let store = self.store.clone();
                 let ready = (**r).clone();
@@ -1728,10 +1755,17 @@ impl App {
                 self.auth = self.auth.apply(AuthEvent::KeyringUnavailable(e));
                 Task::none()
             }
-            Done::TokenValidated { result, revoked } => match result {
+            Done::TokenValidated { generation, .. } if generation != self.validation_generation => {
+                // A validation of a token we switched away from.
+                Task::none()
+            }
+            Done::AccountToken { id, result } => self.on_account_token(id, result),
+            Done::TokenValidated {
+                result, revoked, ..
+            } => match result {
                 Ok(user) => {
                     let first_login = matches!(self.auth, AuthState::Validating);
-                    self.auth = self.auth.apply(AuthEvent::Validated(user));
+                    self.auth = self.auth.apply(AuthEvent::Validated(user.clone()));
                     self.qr = None;
                     self.web_login = None;
                     if first_login && self.gateway_generation == 0
@@ -1739,13 +1773,7 @@ impl App {
                     {
                         self.start_gateway();
                     }
-                    let (s, t) = (self.secrets.clone(), self.token.clone());
-                    match t {
-                        Some(t) => Task::perform(secrets::save_token(s, t), |r| {
-                            Message::Done(Done::TokenSaved(r.map_err(|e| e.user_message())))
-                        }),
-                        None => Task::none(),
-                    }
+                    self.remember_account(&user)
                 }
                 Err(e) if revoked => {
                     self.auth = self.auth.apply(AuthEvent::Revoked);
@@ -2105,6 +2133,7 @@ impl App {
             .into_iter()
             .collect();
         urls.extend(self.cosmetic_urls());
+        urls.extend(self.account_avatar_urls());
         for g in &self.chat.guilds {
             if let Some(u) = self.rest.guild_icon_url(g, 96) {
                 urls.push(u);
@@ -2357,7 +2386,9 @@ impl App {
                 },
             };
             subs.push(
-                Subscription::run_with(key, |k| gateway::spawn(k.value.clone())).map(Message::Net),
+                Subscription::run_with(key, |k| gateway::spawn(k.value.clone()))
+                    .with(self.gateway_generation)
+                    .map(|(generation, ev)| Message::Gateway(generation, ev)),
             );
         }
         let qr_active = matches!(

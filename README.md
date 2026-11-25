@@ -70,6 +70,9 @@ run `cargo build --release`.
   shows its own captcha, 2FA and QR prompts; opens on its own when Discord
   asks for a captcha); token login. The session is stored only in the OS
   keyring.
+- Multiple accounts: switch between up to five saved accounts from the status
+  menu (click your avatar in the user panel) or the login screen, without
+  restarting; each account's token has its own keyring entry.
 - Server rail with unread pills and mention badges, channel list with
   categories, direct messages and group DMs.
 - Message history with Discord markdown (bold, italic, underline, strike,

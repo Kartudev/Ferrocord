@@ -172,6 +172,16 @@ pub struct FerroTheme { pub palette: Palette, pub metrics: Metrics, pub dark: bo
   `Task`, never on the UI thread.
 * If no Secret Service is available (headless CI), the app shows an explicit
   error on the login screen instead of falling back to a file.
+* Ferrocord's account switcher (`auth/accounts.rs`, `app/accounts.rs`): the
+  active token stays under `session`; every saved account also keeps its token
+  under `account.<user id>`. The list the switcher shows (id, names, avatar
+  hash, never a token) is `meta("pref.accounts")`, so it survives the cache
+  wipe. A switch tears the session down like a logout (gateway, voice, chat
+  state, synced settings, SQLite cache) without forgetting the token, then
+  validates the other token like a restored session. Gateway events
+  (`Message::Gateway`) and token validations carry a generation: anything
+  from the previous account is dropped. Logging out (or a revoke) forgets only
+  the active account.
 
 ## 6. Logging and redaction
 

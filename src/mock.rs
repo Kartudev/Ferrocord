@@ -84,6 +84,21 @@ pub fn user(n: u64) -> User {
     user
 }
 
+/// Saved accounts of the mock switcher: the mock user first.
+pub fn saved_accounts() -> Vec<User> {
+    let alt = |id: u64, username: &str, global: &str| User {
+        id: Snowflake(id),
+        username: username.into(),
+        global_name: Some(global.into()),
+        ..Default::default()
+    };
+    vec![
+        user(1),
+        alt(9001, "ferris.alt", "Ferris (alt)"),
+        alt(9002, "work.account", "Work"),
+    ]
+}
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

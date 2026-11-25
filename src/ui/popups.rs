@@ -30,7 +30,7 @@ pub const SLOTS: usize = 10;
 pub fn layers(app: &App) -> Vec<El<'_>> {
     let window = input::window_size();
     let status = if app.status_menu {
-        let size = Size::new(240.0, 188.0);
+        let size = Size::new(240.0, status_menu_height(app));
         let at = Point::new(
             8.0,
             window.height - app.theme.metrics.user_panel_height - size.height - 8.0,
@@ -632,6 +632,15 @@ fn context_menu(app: &App, m: MessageId) -> El<'_> {
     container(col).width(MENU_W).style(theme::popup(p)).into()
 }
 
+/// Height of the status menu: the four statuses, then the account
+/// switcher (header, one row per saved account, "Add an account").
+fn status_menu_height(app: &App) -> f32 {
+    let accounts = app.accounts.len().max(1) as f32;
+    188.0 + 41.0 + accounts * ACCOUNT_ROW_H + 36.0
+}
+
+const ACCOUNT_ROW_H: f32 = 42.0;
+
 fn status_menu(app: &App) -> El<'_> {
     let p = app.theme.palette;
     let mut col = column![].spacing(2).padding(8);
@@ -665,7 +674,100 @@ fn status_menu(app: &App) -> El<'_> {
                 .style(theme::menu_item(p, false)),
         );
     }
+    col = col
+        .push(
+            container(
+                container(Space::new().width(Length::Fill).height(1)).style(theme::bg(p.border)),
+            )
+            .padding(Padding::from([4, 4])),
+        )
+        .push(
+            container(
+                text("SWITCH ACCOUNTS")
+                    .size(11)
+                    .font(INTER_SEMIBOLD)
+                    .color(p.text_muted),
+            )
+            .padding(Padding::from([6, 10])),
+        );
+    for a in &app.accounts.list {
+        col = col.push(account_row(app, a, 24.0));
+    }
+    col = col.push(
+        button(
+            row![
+                icon(Icon::Plus, 16.0, p.text_secondary),
+                text("Add an account")
+                    .size(14)
+                    .font(INTER_MEDIUM)
+                    .width(Length::Fill),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding(Padding::from([8, 10]))
+        .width(Length::Fill)
+        .on_press(ui(Ui::AddAccount))
+        .style(theme::menu_item(p, false)),
+    );
     container(col).width(240).style(theme::popup(p)).into()
+}
+
+/// One saved account: avatar, names, a check on the active one and an
+/// "x" (remove) on the others. Also used by the login screen.
+pub(crate) fn account_row<'a>(
+    app: &'a App,
+    a: &'a crate::auth::accounts::SavedAccount,
+    size: f32,
+) -> El<'a> {
+    let p = app.theme.palette;
+    let active = app.active_account == Some(a.id) && app.auth.is_logged_in();
+    let user = a.user();
+    let face = super::avatar_circle(app, &user, size, crate::app::cosmetics::Phase::Still);
+    let name = a.global_name.as_deref().filter(|n| !n.is_empty());
+    let mut names = column![
+        text(name.unwrap_or(&a.username).to_owned())
+            .size(14)
+            .font(INTER_MEDIUM)
+            .wrapping(text::Wrapping::None)
+    ];
+    if name.is_some() {
+        names = names.push(
+            text(a.username.as_str())
+                .size(12)
+                .color(p.text_muted)
+                .wrapping(text::Wrapping::None),
+        );
+    }
+    let main = button(
+        row![face, container(names).width(Length::Fill).clip(true)]
+            .spacing(10)
+            .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([4, 10]))
+    .width(Length::Fill)
+    .style(theme::menu_item(p, false));
+    let main = if active {
+        main
+    } else {
+        main.on_press(ui(Ui::SwitchAccount(a.id)))
+    };
+    let side: El<'a> = if active {
+        container(icon(Icon::Check, 16.0, p.text_secondary))
+            .padding(Padding::from([0, 10]))
+            .into()
+    } else {
+        button(icon(Icon::X, 14.0, p.text_muted))
+            .padding(6)
+            .on_press(ui(Ui::RemoveAccount(a.id)))
+            .style(theme::icon_button(p))
+            .into()
+    };
+    row![main, side]
+        .spacing(2)
+        .height(ACCOUNT_ROW_H - 2.0)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 fn emoji_picker<'a>(app: &'a App, open: &'a OpenPicker) -> El<'a> {
