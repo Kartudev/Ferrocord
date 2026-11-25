@@ -141,7 +141,7 @@ impl InstallMethod {
 pub fn cargo_command() -> String {
     format!(
         "cargo install --git https://github.com/{} --locked --force",
-        super::REPO
+        super::repo()
     )
 }
 

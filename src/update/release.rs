@@ -99,7 +99,7 @@ impl Release {
         if self.html_url.starts_with("https://github.com/") {
             self.html_url.clone()
         } else {
-            super::RELEASES_PAGE.to_owned()
+            super::releases_page()
         }
     }
 
@@ -226,7 +226,7 @@ mod tests {
     fn a_non_github_page_falls_back_to_the_releases_list() {
         let d = doc("v0.18.0", "").replace("https://github.com/FerroApps", "javascript:alert");
         let r = Release::parse(d.as_bytes()).unwrap();
-        assert_eq!(r.page(), crate::update::RELEASES_PAGE);
+        assert_eq!(r.page(), crate::update::releases_page());
     }
 
     #[test]

@@ -345,6 +345,9 @@ rule; mock and screenshot mode never touch the network).
   telemetry, no machine id. 403/429 back off silently (`retry-after` /
   `x-ratelimit-reset`, 1 h to 24 h). `FERRO_RELEASE_API` overrides the URL
   (same meaning as in `install.sh`; HTTPS, or HTTP on loopback for tests).
+  A fork that publishes its own builds (same asset names) builds with
+  `FERRO_UPDATE_REPO=owner/name` (compile time, `update::repo()`): the
+  URL, release page and `cargo install` command then name that repository.
 - **When**: 10–20 s after start (jitter), then every 6 h + up to 30 min,
   also while hidden in the tray (a sleeping `Task`, generation-checked).
   Settings → Updates → "Check for updates automatically" (`update.auto`,
