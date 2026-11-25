@@ -1,19 +1,21 @@
 name: Test release
 
-# Fork only. Builds a test release (Linux x86_64 tarball + .sha256, the same
-# names and layout as upstream's release.yml) that installs built from this
-# fork update to with the in-app updater: the binary is built with
-# FERRO_UPDATE_REPO=<this repo>, so it checks this fork's releases.
+# Fork only. Builds a test release with the same assets as upstream's
+# release.yml (Linux x86_64 tarball + Windows x86_64 zip, each with a
+# .sha256) that installs built from this fork update to with the in-app
+# updater: the binaries are built with FERRO_UPDATE_REPO=<this repo>, so they
+# check this fork's releases.
 #
 #   - Every 30 min: builds branch `testing` when its head changed since the
 #     last test release (merge whatever you want to try into `testing`).
 #   - Actions -> Test release -> Run workflow: builds any branch/tag/SHA.
 #
+# The release starts as a draft and is published only once both platforms
+# are attached (the updater never sees a half-filled release).
 # Versions: <upstream x.y>.<patch*1000 + run number>, always higher than the
-# previous test release, so the updater offers every new build. Releases are
-# normal (not pre-release) because the updater reads `releases/latest`, which
-# skips pre-releases; their title says "Test build". Only the newest KEEP
-# test builds are kept.
+# previous test release. Releases are normal (not pre-release) because the
+# updater reads `releases/latest`, which skips pre-releases; their title says
+# "Test build". Only the newest KEEP test builds are kept.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -37,10 +39,14 @@ env:
   KEEP: 10
 
 jobs:
-  build:
+  decide:
     if: github.repository != 'FerroApps/Ferrocord'
-    # Same image as release.yml (older glibc, runs on more distros).
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.src.outputs.skip }}
+      ref: ${{ steps.src.outputs.ref }}
+      sha: ${{ steps.ver.outputs.sha }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - name: Decide what to build
         id: src
@@ -69,31 +75,19 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.src.outputs.skip != 'true'
         with:
-          path: ci
-          sparse-checkout: .github/fork
-      - uses: actions/checkout@v4
-        if: steps.src.outputs.skip != 'true'
-        with:
           ref: ${{ steps.src.outputs.ref }}
-          path: src
-          fetch-depth: 0
 
-      - name: Point the updater at this fork and set the test version
+      - name: Pick the version and open a draft release
         if: steps.src.outputs.skip != 'true'
         id: ver
-        working-directory: src
         env:
+          GH_TOKEN: ${{ github.token }}
           LAST: ${{ steps.src.outputs.last_ver }}
           RUN: ${{ github.run_number }}
+          REF: ${{ steps.src.outputs.ref }}
         run: |
           set -euo pipefail
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          # Until upstream has FERRO_UPDATE_REPO, apply the patch that adds it.
-          if ! grep -q FERRO_UPDATE_REPO src/update/mod.rs; then
-            git apply --3way ../ci/.github/fork/update-repo-override.patch \
-              || { echo "::error::update-repo-override.patch no longer applies; refresh it"; exit 1; }
-          fi
-          grep -q FERRO_UPDATE_REPO src/update/mod.rs
+          sha="$(git rev-parse HEAD)"
           base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           IFS=. read -r ma mi pa <<< "$base"
           new="$ma.$mi.$((pa * 1000 + RUN))"
@@ -102,13 +96,37 @@ jobs:
             IFS=. read -r ma mi pa <<< "$LAST"
             new="$ma.$mi.$((pa + 1))"
           fi
-          sed -i "0,/^version = \".*\"/s//version = \"$new\"/" Cargo.toml
-          sed -i "/^name = \"ferrocord\"$/{n;s/^version = \".*\"/version = \"$new\"/}" Cargo.lock
+          # Drop drafts left behind by failed runs.
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,name,isDraft \
+            --jq '.[] | select(.isDraft and (.name | startswith("Test build "))) | .tagName' \
+          | while read -r tag; do gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes; done
+          gh release create "v$new" -R "$GITHUB_REPOSITORY" --draft --target "$sha" \
+            --title "Test build v$new ($REF)" \
+            --notes "Test build of \`$REF\` at $sha (fork channel, not an official release)."
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$new" >> "$GITHUB_OUTPUT"
-          echo "Building $new from $(git rev-parse --short HEAD) (base $base)"
+          echo "Building $new from ${sha:0:7} (base $base)"
 
+  linux:
+    needs: decide
+    if: needs.decide.outputs.skip == 'false'
+    # Same image as release.yml (older glibc, runs on more distros).
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: .github/fork
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.decide.outputs.sha }}
+          path: src
+      - name: Point the updater at this fork and set the version
+        working-directory: src
+        run: bash ../ci/.github/fork/prepare.sh ../ci/.github/fork/update-repo-override.patch "$VERSION"
       - name: Install system libraries
-        if: steps.src.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -116,26 +134,18 @@ jobs:
             libwayland-dev libfontconfig1-dev libasound2-dev \
             libwebkit2gtk-4.1-dev libgtk-3-dev
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.src.outputs.skip != 'true'
       - uses: Swatinem/rust-cache@v2
-        if: steps.src.outputs.skip != 'true'
         with:
           workspaces: src
-
       - name: Build release binary
-        if: steps.src.outputs.skip != 'true'
         working-directory: src
         run: |
           export CXXSTDLIB=static=stdc++
           export RUSTFLAGS="-L native=$(dirname "$(g++ -print-file-name=libstdc++.a)")"
           export FERRO_UPDATE_REPO="$GITHUB_REPOSITORY"
           cargo build --release --locked
-
       - name: Package
-        if: steps.src.outputs.skip != 'true'
         working-directory: src
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
           name="ferrocord-v${VERSION}-linux-x86_64"
@@ -151,25 +161,81 @@ jobs:
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           ls -l dist
-
-      - name: Publish the test release
-        if: steps.src.outputs.skip != 'true'
+      - name: Upload to the draft release
         working-directory: src
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.ver.outputs.version }}
-          SHA: ${{ steps.ver.outputs.sha }}
-          REF: ${{ steps.src.outputs.ref }}
+        run: |
+          name="ferrocord-v${VERSION}-linux-x86_64"
+          gh release upload "v${VERSION}" -R "$GITHUB_REPOSITORY" "dist/$name.tar.gz" "dist/$name.tar.gz.sha256" --clobber
+
+  windows:
+    needs: decide
+    if: needs.decide.outputs.skip == 'false'
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      # LF checkouts, so the patch and the Cargo.lock edit match.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: .github/fork
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.decide.outputs.sha }}
+          path: src
+      - name: Point the updater at this fork and set the version
+        working-directory: src
+        shell: bash
+        run: bash ../ci/.github/fork/prepare.sh ../ci/.github/fork/update-repo-override.patch "$VERSION"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - name: Build release binary
+        working-directory: src
+        shell: pwsh
+        run: |
+          $env:FERRO_UPDATE_REPO = "$env:GITHUB_REPOSITORY"
+          cargo build --release --locked
+      - name: Package
+        working-directory: src
+        shell: pwsh
+        run: |
+          $name = "ferrocord-v$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$name/licenses" | Out-Null
+          Copy-Item target/release/ferrocord.exe, target/release/ferrocord-login.exe, target/release/ferrocord-player.exe, README.md, LICENSE "dist/$name/"
+          Copy-Item assets/fonts/OFL.txt "dist/$name/licenses/Inter-OFL.txt"
+          Copy-Item assets/icons/LICENSE "dist/$name/licenses/Lucide-ISC.txt"
+          Copy-Item THIRD_PARTY.md "dist/$name/licenses/THIRD_PARTY.md"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File "dist/$name.zip.sha256" -Encoding ascii
+          Get-ChildItem dist
+      - name: Upload to the draft release
+        working-directory: src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "ferrocord-v$env:VERSION-windows-x86_64"
+          gh release upload "v$env:VERSION" -R "$env:GITHUB_REPOSITORY" "dist/$name.zip" "dist/$name.zip.sha256" --clobber
+
+  publish:
+    needs: [decide, linux, windows]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.decide.outputs.version }}
+    steps:
+      - name: Publish and prune old test builds
         run: |
           set -euo pipefail
-          name="ferrocord-v${VERSION}-linux-x86_64"
-          notes="Test build of \`$REF\` at $SHA (fork channel, not an official release)."
-          gh release create "v${VERSION}" -R "$GITHUB_REPOSITORY" --target "$SHA" --latest \
-            --title "Test build v${VERSION} ($REF)" --notes "$notes" \
-            "dist/$name.tar.gz" "dist/$name.tar.gz.sha256"
-          # Keep the newest $KEEP test builds (only releases titled "Test build").
-          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,name,createdAt \
-            --jq '[.[] | select(.name | startswith("Test build "))] | sort_by(.createdAt) | reverse | .['"$KEEP"':][] | .tagName' \
+          gh release edit "v${VERSION}" -R "$GITHUB_REPOSITORY" --draft=false --latest
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,name,createdAt,isDraft \
+            --jq '[.[] | select((.isDraft | not) and (.name | startswith("Test build ")))] | sort_by(.createdAt) | reverse | .['"$KEEP"':][] | .tagName' \
           | while read -r tag; do
               gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
             done
