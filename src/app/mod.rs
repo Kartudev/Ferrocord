@@ -1,6 +1,7 @@
 //! Application state and update loop (the "Elm" side). No direct I/O:
 //! everything that touches the network, disk or keyring runs in a `Task`.
 
+pub mod acks;
 pub mod actions;
 pub mod anim;
 mod background;
@@ -118,6 +119,8 @@ pub struct App {
     pub composer: composer::Composer,
     drafts: composer::Drafts,
     last_typing_sent: HashMap<ChannelId, u64>,
+    /// Read acks of the focused channel, coalesced (`acks.rs`).
+    acks: acks::AckQueue,
     pub collapsed: HashSet<ChannelId>,
     pub revealed_spoilers: HashSet<MessageId>,
     pub images: images::ImageCache,
@@ -278,6 +281,7 @@ impl App {
             composer: composer::Composer::new(),
             drafts: composer::Drafts::default(),
             last_typing_sent: HashMap::new(),
+            acks: acks::AckQueue::default(),
             collapsed: HashSet::new(),
             revealed_spoilers: HashSet::new(),
             images: images::ImageCache::default(),
@@ -1280,6 +1284,7 @@ impl App {
         if self.cfg.mock {
             return persist;
         }
+        self.acks.forget(c);
         let rest = self.rest.clone();
         Task::batch([
             persist,
@@ -1478,6 +1483,7 @@ impl App {
         let _ = self.voice.leave(me);
         self.voice = voice::Voice::with_prefs(self.voice.prefs.clone());
         self.token = None;
+        self.acks.clear();
         self.gateway_generation += 1;
         self.auth = self.auth.apply(AuthEvent::LoggedOut);
         self.connection = ConnectionState::Disconnected;
@@ -1638,10 +1644,14 @@ impl App {
                     tasks.push(self.flash_taskbar());
                 }
                 Effect::Ack(c, m) if !self.cfg.mock => {
-                    let rest = self.rest.clone();
-                    tasks.push(Task::perform(async move { rest.ack(c, m).await }, |_| {
-                        Message::Done(Done::Ignored)
-                    }));
+                    // One ack per channel every few seconds, not one per
+                    // incoming message.
+                    if self.acks.push(c, m) {
+                        tasks.push(actions::delayed(
+                            Done::FlushAcks,
+                            acks::ACK_DELAY.as_millis() as u64,
+                        ));
+                    }
                 }
                 Effect::Ack(..) => {}
             }
@@ -1662,6 +1672,15 @@ impl App {
     fn on_done(&mut self, d: Done) -> Task<Message> {
         match d {
             Done::Ignored => Task::none(),
+            Done::FlushAcks => {
+                let rest = self.rest.clone();
+                Task::batch(self.acks.drain().into_iter().map(|(c, m)| {
+                    let rest = rest.clone();
+                    Task::perform(async move { rest.ack(c, m).await }, |_| {
+                        Message::Done(Done::Ignored)
+                    })
+                }))
+            }
             Done::QuitReady => iced::exit(),
             d @ (Done::Profile { .. } | Done::ProfileEffects(_) | Done::Anim { .. }) => {
                 self.on_cosmetics_done(d)

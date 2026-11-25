@@ -353,6 +353,8 @@ pub enum Done {
         generation: u64,
         result: Result<SearchPage, String>,
     },
+    /// The coalesced read-ack timer fired (`acks.rs`).
+    FlushAcks,
     /// The GIF search debounce timer of this generation fired.
     GifSearchDue(u64),
     Gifs {
