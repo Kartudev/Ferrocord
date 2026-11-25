@@ -11,6 +11,8 @@ use iced::Task;
 use super::permissions::MANAGE_GUILD;
 use super::servers::{NAME_MAX, NAME_MIN};
 use super::{App, Done, Message, Ui, View};
+use crate::error::Error;
+use crate::net::mfa::{MfaChallenge, MfaMethod, clean_code};
 use crate::net::model::*;
 use crate::net::rest::guild::GuildEdit;
 
@@ -34,6 +36,10 @@ pub enum AdminUi {
     AskDelete,
     DeleteTyped(String),
     ConfirmDelete,
+    /// The two-factor code typed in the Delete Server dialog.
+    MfaCode(String),
+    /// Authenticator app or backup code.
+    MfaUse(MfaMethod),
     /// Closes the open confirmation / invite dialog.
     CloseDialog,
 }
@@ -58,6 +64,11 @@ pub enum AdminDone {
     Deleted {
         guild: GuildId,
         result: Result<(), String>,
+    },
+    /// Deleting needs a two-factor code first.
+    DeleteNeedsMfa {
+        guild: GuildId,
+        challenge: Box<MfaChallenge>,
     },
 }
 
@@ -92,6 +103,36 @@ pub struct DeleteForm {
     pub typed: String,
     pub busy: bool,
     pub error: Option<String>,
+    /// Discord asked for a two-factor code.
+    pub mfa: Option<MfaStep>,
+}
+
+/// The two-factor step of a sensitive action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MfaStep {
+    pub challenge: MfaChallenge,
+    pub method: MfaMethod,
+    pub code: String,
+}
+
+impl MfaStep {
+    pub fn new(challenge: MfaChallenge) -> Self {
+        let method = if challenge.allows(MfaMethod::Totp) {
+            MfaMethod::Totp
+        } else {
+            MfaMethod::Backup
+        };
+        Self {
+            challenge,
+            method,
+            code: String::new(),
+        }
+    }
+
+    /// The code to send, when it looks like one.
+    pub fn code(&self) -> Option<String> {
+        clean_code(self.method, &self.code)
+    }
 }
 
 impl DeleteForm {
@@ -177,11 +218,11 @@ pub struct Admin {
     /// Page of the Server Settings screen.
     pub page: super::role_admin::SettingsPage,
     pub roles: super::role_admin::RolesPage,
+    pub bans: super::bans::BansPage,
 }
 
 /// Wording for a refused admin call.
 pub fn admin_error_text(e: &crate::error::Error) -> String {
-    use crate::error::Error;
     match e {
         Error::Http { status: 403, .. } => "You do not have permission to do that.".into(),
         Error::Http {
@@ -195,6 +236,13 @@ pub fn admin_error_text(e: &crate::error::Error) -> String {
         }
         Error::Http { status: 429, .. } => {
             "Discord is rate limiting this. Wait a minute and try again.".into()
+        }
+        Error::MfaRequired(c) if !c.supported() => "Discord asks for a two-factor check this app \
+             cannot do (text message, password or security key); do it in the official client."
+            .into(),
+        Error::MfaRequired(_) => {
+            "Discord asks for two-factor authentication for this; do it in the official client."
+                .into()
         }
         other => other.user_message(),
     }
@@ -213,7 +261,7 @@ impl App {
     /// Whether "Server Settings" is offered for `g`: Manage Server
     /// (Overview) or Manage Roles (Roles).
     pub fn can_open_server_settings(&self, g: GuildId) -> bool {
-        self.can_manage_guild(g) || self.can_manage_roles(g)
+        self.can_manage_guild(g) || self.can_manage_roles(g) || self.can_ban(g)
     }
 
     /// Whether the user may edit the Overview of `g`.
@@ -262,18 +310,21 @@ impl App {
                 }
                 self.admin.settings = Some(SettingsForm::new(guild));
                 self.admin.dialog = None;
-                self.admin.roles = Default::default();
-                self.admin.page = if self.can_manage_guild(g) {
-                    super::role_admin::SettingsPage::Overview
+                use super::role_admin::{RoleUi, SettingsPage};
+                let first = if self.can_manage_guild(g) {
+                    SettingsPage::Overview
+                } else if self.can_manage_roles(g) {
+                    SettingsPage::Roles
                 } else {
-                    super::role_admin::SettingsPage::Roles
+                    SettingsPage::Bans
                 };
-                Task::none()
+                self.update_roles(RoleUi::Page(first))
             }
             AdminUi::CloseSettings => {
                 self.admin.settings = None;
                 self.admin.dialog = None;
                 self.admin.roles = Default::default();
+                self.admin.bans = Default::default();
                 Task::none()
             }
             AdminUi::NameChanged(s) => {
@@ -327,6 +378,7 @@ impl App {
                     typed: String::new(),
                     busy: false,
                     error: None,
+                    mfa: None,
                 }));
                 iced::widget::operation::focus(crate::ui::server_settings::delete_input_id())
             }
@@ -338,6 +390,26 @@ impl App {
                 Task::none()
             }
             AdminUi::ConfirmDelete => self.delete_guild(),
+            AdminUi::MfaCode(s) => {
+                if let Some(AdminDialog::Delete(d)) = self.admin.dialog.as_mut()
+                    && let Some(m) = d.mfa.as_mut()
+                {
+                    m.code = s.chars().take(16).collect();
+                    d.error = None;
+                }
+                Task::none()
+            }
+            AdminUi::MfaUse(method) => {
+                if let Some(AdminDialog::Delete(d)) = self.admin.dialog.as_mut()
+                    && let Some(m) = d.mfa.as_mut()
+                    && m.challenge.allows(method)
+                {
+                    m.method = method;
+                    m.code.clear();
+                    d.error = None;
+                }
+                iced::widget::operation::focus(crate::ui::server_settings::mfa_input_id())
+            }
             AdminUi::CloseDialog => {
                 let busy = match &self.admin.dialog {
                     Some(AdminDialog::Leave(c)) => c.busy,
@@ -472,6 +544,20 @@ impl App {
         if d.busy || !d.matches(&name) {
             return Task::none();
         }
+        // With a two-factor step: the code first, then the same request.
+        let answer = match &d.mfa {
+            Some(m) => match m.code() {
+                Some(code) => Some((m.challenge.ticket.clone(), m.method, code)),
+                None => {
+                    d.error = Some(match m.method {
+                        MfaMethod::Backup => "Enter an 8-character backup code.".into(),
+                        _ => "Enter the 6-digit code from your authenticator app.".into(),
+                    });
+                    return Task::none();
+                }
+            },
+            None => None,
+        };
         d.busy = true;
         d.error = None;
         let guild = d.guild;
@@ -482,16 +568,49 @@ impl App {
             })));
         }
         let rest = self.rest.clone();
-        Task::perform(async move { rest.delete_guild(guild).await }, move |r| {
-            Message::Done(Done::Admin(AdminDone::Deleted {
-                guild,
-                result: admin(r),
-            }))
-        })
+        Task::perform(
+            async move {
+                match answer {
+                    Some((ticket, method, code)) => {
+                        let token = rest.mfa_finish(&ticket, method, &code).await?;
+                        rest.delete_guild(guild, Some(&token)).await
+                    }
+                    None => rest.delete_guild(guild, None).await,
+                }
+            },
+            move |r| {
+                Message::Done(Done::Admin(match r {
+                    Err(Error::MfaRequired(c)) if c.supported() => AdminDone::DeleteNeedsMfa {
+                        guild,
+                        challenge: c,
+                    },
+                    r => AdminDone::Deleted {
+                        guild,
+                        result: admin(r),
+                    },
+                }))
+            },
+        )
     }
 
     pub(super) fn on_admin_done(&mut self, d: AdminDone) -> Task<Message> {
         match d {
+            AdminDone::DeleteNeedsMfa { guild, challenge } => {
+                let Some(AdminDialog::Delete(d)) = self.admin.dialog.as_mut() else {
+                    return Task::none();
+                };
+                if d.guild != guild {
+                    return Task::none();
+                }
+                d.busy = false;
+                // A second demand means the ticket ran out: ask again.
+                d.error = d
+                    .mfa
+                    .is_some()
+                    .then(|| "That code expired. Enter a new one.".to_owned());
+                d.mfa = Some(MfaStep::new(*challenge));
+                iced::widget::operation::focus(crate::ui::server_settings::mfa_input_id())
+            }
             AdminDone::Invite { guild, result } => {
                 if let Some(AdminDialog::Invite(i)) = self.admin.dialog.as_mut()
                     && i.guild == guild
@@ -635,6 +754,7 @@ mod tests {
             typed: String::new(),
             busy: false,
             error: None,
+            mfa: None,
         };
         assert!(!d.matches("Test"));
         d.typed = "test".into();
@@ -731,6 +851,45 @@ mod tests {
         // Escape closes the screen.
         let _ = a.update(Message::Ui(Ui::Escape));
         assert!(a.admin.settings.is_none());
+    }
+
+    #[test]
+    fn delete_asks_for_a_two_factor_code() {
+        let mut a = App::boot(crate::config::Config::for_tests()).0;
+        let g = crate::mock::GUILD_GAMES;
+        admin_ui(&mut a, AdminUi::OpenSettings(g));
+        admin_ui(&mut a, AdminUi::AskDelete);
+        admin_ui(&mut a, AdminUi::DeleteTyped("Game Night".into()));
+        let c = MfaChallenge::parse(
+            r#"{"code":60003,"mfa":{"ticket":"t","methods":[{"type":"totp","backup_codes_allowed":true}]}}"#,
+        )
+        .unwrap();
+        let _ = a.on_admin_done(AdminDone::DeleteNeedsMfa {
+            guild: g,
+            challenge: Box::new(c.clone()),
+        });
+        let mfa = |a: &App| match &a.admin.dialog {
+            Some(AdminDialog::Delete(d)) => d.clone(),
+            _ => panic!("no delete dialog"),
+        };
+        assert_eq!(mfa(&a).mfa.as_ref().unwrap().method, MfaMethod::Totp);
+        assert!(mfa(&a).error.is_none());
+        // A short code is refused locally.
+        admin_ui(&mut a, AdminUi::MfaCode("123".into()));
+        admin_ui(&mut a, AdminUi::ConfirmDelete);
+        assert!(!mfa(&a).busy);
+        assert!(mfa(&a).error.unwrap().contains("6-digit"));
+        // Backup codes switch the field.
+        admin_ui(&mut a, AdminUi::MfaUse(MfaMethod::Backup));
+        assert_eq!(mfa(&a).mfa.unwrap().method, MfaMethod::Backup);
+        admin_ui(&mut a, AdminUi::MfaCode("abcd-1234".into()));
+        assert_eq!(mfa(&a).mfa.unwrap().code().as_deref(), Some("abcd1234"));
+        // A second demand means the ticket ran out.
+        let _ = a.on_admin_done(AdminDone::DeleteNeedsMfa {
+            guild: g,
+            challenge: Box::new(c),
+        });
+        assert!(mfa(&a).error.unwrap().contains("expired"));
     }
 
     #[test]

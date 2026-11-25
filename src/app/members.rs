@@ -282,6 +282,8 @@ mod tests {
                 color: 0,
                 position: 1,
                 permissions: 0,
+                hoist: false,
+                mentionable: false,
             }],
             owner_id: None,
             emojis: vec![],

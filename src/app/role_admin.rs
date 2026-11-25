@@ -33,6 +33,7 @@ pub enum SettingsPage {
     #[default]
     Overview,
     Roles,
+    Bans,
 }
 
 /// What a moderation dialog does.
@@ -50,7 +51,13 @@ pub enum RoleUi {
     Create,
     Name(String),
     Color(u32),
+    /// "Display role members separately from online members".
+    Hoist(bool),
+    /// "Allow anyone to @mention this role".
+    Mentionable(bool),
     Permission(u64, bool),
+    /// Moves a role one place up (+1, higher) or down (-1).
+    MoveRole(RoleId, i32),
     Reset,
     Save,
     AskDelete,
@@ -103,6 +110,12 @@ pub enum RoleDone {
         user: UserId,
         result: Result<String, String>,
     },
+    Reordered {
+        guild: GuildId,
+        /// Positions before the move, restored on failure.
+        previous: Vec<(RoleId, i32)>,
+        result: Result<(), String>,
+    },
 }
 
 /// The role being edited.
@@ -114,7 +127,9 @@ pub struct RoleForm {
     pub name: String,
     pub color: u32,
     pub permissions: u64,
-    original: (String, u32, u64),
+    pub hoist: bool,
+    pub mentionable: bool,
+    original: (String, u32, u64, bool, bool),
     pub busy: bool,
     pub error: Option<String>,
 }
@@ -127,20 +142,29 @@ impl RoleForm {
             name: r.name.clone(),
             color: r.color,
             permissions: r.permissions,
-            original: (r.name.clone(), r.color, r.permissions),
+            hoist: r.hoist,
+            mentionable: r.mentionable,
+            original: (
+                r.name.clone(),
+                r.color,
+                r.permissions,
+                r.hoist,
+                r.mentionable,
+            ),
             busy: false,
             error: None,
         }
     }
 
     pub fn edit(&self) -> RoleEdit {
-        let (name, color, perms) = &self.original;
+        let (name, color, perms, hoist, mentionable) = &self.original;
+        let role = !self.everyone;
         RoleEdit {
-            name: (!self.everyone && self.name.trim() != name.trim())
-                .then(|| self.name.trim().to_owned()),
-            color: (!self.everyone && self.color != *color).then_some(self.color),
+            name: (role && self.name.trim() != name.trim()).then(|| self.name.trim().to_owned()),
+            color: (role && self.color != *color).then_some(self.color),
             permissions: (self.permissions != *perms).then_some(self.permissions),
-            ..Default::default()
+            hoist: (role && self.hoist != *hoist).then_some(self.hoist),
+            mentionable: (role && self.mentionable != *mentionable).then_some(self.mentionable),
         }
     }
 
@@ -157,10 +181,12 @@ impl RoleForm {
     }
 
     pub fn reset(&mut self) {
-        let (name, color, perms) = self.original.clone();
+        let (name, color, perms, hoist, mentionable) = self.original.clone();
         self.name = name;
         self.color = color;
         self.permissions = perms;
+        self.hoist = hoist;
+        self.mentionable = mentionable;
         self.error = None;
     }
 }
@@ -215,6 +241,43 @@ impl ModForm {
             },
         }
     }
+}
+
+/// New positions after moving `role` one place up (`dir` > 0, higher) or
+/// down among the roles of `g` (`@everyone` never moves), or `None` when it
+/// cannot move: the edge, or a neighbour at or above `my_top` (from
+/// [`permissions::top_position`]). Two roles swap positions; tied
+/// positions are renumbered 1.. first.
+pub fn role_reorder(
+    g: &Guild,
+    role: RoleId,
+    dir: i32,
+    my_top: Option<i32>,
+) -> Option<Vec<(RoleId, i32)>> {
+    let mut roles: Vec<&Role> = g.roles.iter().filter(|r| r.id != g.id).collect();
+    roles.sort_by_key(|r| (r.position, r.id));
+    let i = roles.iter().position(|r| r.id == role)?;
+    let j = i.checked_add_signed(dir.signum() as isize)?;
+    let nb = roles.get(j)?;
+    let below = |p: i32| permissions::outranks(my_top, Some(p));
+    if !below(roles[i].position) || !below(nb.position) {
+        return None;
+    }
+    let mut pos: Vec<(RoleId, i32)> = roles.iter().map(|r| (r.id, r.position)).collect();
+    let tied = pos.windows(2).any(|w| w[0].1 == w[1].1);
+    if tied {
+        for (k, p) in pos.iter_mut().enumerate() {
+            p.1 = k as i32 + 1;
+        }
+    }
+    let (a, b) = (pos[i].1, pos[j].1);
+    pos[i].1 = b;
+    pos[j].1 = a;
+    let changed: Vec<(RoleId, i32)> = pos
+        .into_iter()
+        .filter(|(id, p)| roles.iter().any(|r| r.id == *id && r.position != *p))
+        .collect();
+    (!changed.is_empty()).then_some(changed)
 }
 
 /// The roles of `g` in list order (highest first, `@everyone` last).
@@ -309,15 +372,21 @@ impl App {
                 let allowed = match p {
                     SettingsPage::Overview => self.can_manage_guild(g),
                     SettingsPage::Roles => self.can_manage_roles(g),
+                    SettingsPage::Bans => self.can_ban(g),
                 };
-                if allowed {
-                    self.admin.page = p;
-                    self.admin.roles = RolesPage::default();
-                    if p == SettingsPage::Overview
-                        && let Some(f) = self.admin.settings.as_mut()
-                    {
-                        f.reset();
-                    }
+                if !allowed {
+                    return Task::none();
+                }
+                self.admin.page = p;
+                self.admin.roles = RolesPage::default();
+                self.admin.bans = Default::default();
+                if p == SettingsPage::Overview
+                    && let Some(f) = self.admin.settings.as_mut()
+                {
+                    f.reset();
+                }
+                if p == SettingsPage::Bans {
+                    return self.load_bans(g);
                 }
                 Task::none()
             }
@@ -354,6 +423,19 @@ impl App {
                 }
                 Task::none()
             }
+            RoleUi::Hoist(on) => {
+                if let Some(f) = self.admin.roles.form.as_mut().filter(|f| !f.everyone) {
+                    f.hoist = on;
+                }
+                Task::none()
+            }
+            RoleUi::Mentionable(on) => {
+                if let Some(f) = self.admin.roles.form.as_mut().filter(|f| !f.everyone) {
+                    f.mentionable = on;
+                }
+                Task::none()
+            }
+            RoleUi::MoveRole(role, dir) => self.move_role(role, dir),
             RoleUi::Permission(bit, on) => {
                 let grantable = self.settings_guild().map_or(0, |g| self.grantable(g));
                 if let Some(f) = self.admin.roles.form.as_mut()
@@ -452,6 +534,81 @@ impl App {
         }
     }
 
+    /// Where `role` can move in `g` (`dir` +1 up, -1 down).
+    pub fn role_move(&self, g: GuildId, role: RoleId, dir: i32) -> Option<Vec<(RoleId, i32)>> {
+        let guild = self.chat.guild(g)?;
+        if !self.can_manage_roles(g) {
+            return None;
+        }
+        role_reorder(guild, role, dir, self.me_top(guild))
+    }
+
+    /// Sets role positions locally (as GUILD_ROLE_UPDATE would).
+    fn set_role_positions(&mut self, g: GuildId, moves: &[(RoleId, i32)]) {
+        let Some(guild) = self.chat.guild(g) else {
+            return;
+        };
+        let updated: Vec<Role> = moves
+            .iter()
+            .filter_map(|(id, p)| {
+                let mut r = guild.roles.iter().find(|r| r.id == *id)?.clone();
+                r.position = *p;
+                Some(r)
+            })
+            .collect();
+        let ctx = self.ctx();
+        for role in updated {
+            let _ = self
+                .chat
+                .apply_event(&Event::RoleUpsert { guild_id: g, role }, &ctx);
+        }
+    }
+
+    /// Moves a role at once (optimistic); a failure puts it back.
+    fn move_role(&mut self, role: RoleId, dir: i32) -> Task<Message> {
+        let Some(g) = self.settings_guild() else {
+            return Task::none();
+        };
+        let Some(moves) = self.role_move(g, role, dir) else {
+            return Task::none();
+        };
+        let previous: Vec<(RoleId, i32)> = self
+            .chat
+            .guild(g)
+            .map(|guild| {
+                moves
+                    .iter()
+                    .filter_map(|(id, _)| {
+                        guild
+                            .roles
+                            .iter()
+                            .find(|r| r.id == *id)
+                            .map(|r| (r.id, r.position))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.set_role_positions(g, &moves);
+        if self.cfg.mock {
+            return Task::done(Message::Done(Done::Roles(RoleDone::Reordered {
+                guild: g,
+                previous,
+                result: Ok(()),
+            })));
+        }
+        let rest = self.rest.clone();
+        Task::perform(
+            async move { rest.reorder_roles(g, &moves).await },
+            move |r| {
+                Message::Done(Done::Roles(RoleDone::Reordered {
+                    guild: g,
+                    previous: previous.clone(),
+                    result: r.map_err(|e| admin_error_text(&e)),
+                }))
+            },
+        )
+    }
+
     fn create_role(&mut self) -> Task<Message> {
         let Some(g) = self.settings_guild() else {
             return Task::none();
@@ -475,6 +632,8 @@ impl App {
                     color: 0,
                     position: 1,
                     permissions: 0,
+                    hoist: false,
+                    mentionable: false,
                 }),
             })));
         }
@@ -705,6 +864,12 @@ impl App {
                             if let Some(p) = edit.permissions {
                                 r.permissions = p;
                             }
+                            if let Some(h) = edit.hoist {
+                                r.hoist = h;
+                            }
+                            if let Some(m) = edit.mentionable {
+                                r.mentionable = m;
+                            }
                             if let Some(f) = form {
                                 let everyone = f.everyone;
                                 *f = RoleForm::new(&r, everyone);
@@ -772,6 +937,16 @@ impl App {
                     if let Err(e) = result {
                         *error = Some(e);
                     }
+                }
+            }
+            RoleDone::Reordered {
+                guild,
+                previous,
+                result,
+            } => {
+                if let Err(e) = result {
+                    self.set_role_positions(guild, &previous);
+                    self.toast = Some(format!("Could not move the role: {e}"));
                 }
             }
             RoleDone::Moderated {
@@ -886,6 +1061,8 @@ mod tests {
                 color: 0,
                 position: 1,
                 permissions: 0,
+                hoist: false,
+                mentionable: false,
             }),
         });
         assert_eq!(
@@ -978,6 +1155,76 @@ mod tests {
             &a.member_dialog,
             Some(MemberDialog::Roles { pending, error: Some(_), .. }) if pending.is_empty()
         ));
+    }
+
+    #[test]
+    fn roles_move_within_reach() {
+        let role = |id: u64, position: i32| Role {
+            id: Snowflake(id),
+            name: String::new(),
+            color: 0,
+            position,
+            permissions: 0,
+            hoist: false,
+            mentionable: false,
+        };
+        let g = Guild {
+            id: Snowflake(1),
+            name: "g".into(),
+            icon: None,
+            roles: vec![role(1, 0), role(10, 1), role(11, 2), role(12, 3)],
+            owner_id: None,
+            emojis: vec![],
+            stickers: vec![],
+            premium_tier: 0,
+        };
+        // Owner: swap 10 and 11.
+        assert_eq!(
+            role_reorder(&g, Snowflake(10), 1, None),
+            Some(vec![(Snowflake(10), 2), (Snowflake(11), 1)])
+        );
+        // Edges.
+        assert_eq!(role_reorder(&g, Snowflake(12), 1, None), None);
+        assert_eq!(role_reorder(&g, Snowflake(10), -1, None), None);
+        // A member whose top role is 12 (position 3) cannot move 11 above it.
+        assert_eq!(role_reorder(&g, Snowflake(11), 1, Some(3)), None);
+        assert!(role_reorder(&g, Snowflake(11), -1, Some(3)).is_some());
+        // Tied positions are renumbered first.
+        let mut tied = g.clone();
+        tied.roles = vec![role(1, 0), role(10, 1), role(11, 1)];
+        assert_eq!(
+            role_reorder(&tied, Snowflake(10), 1, None),
+            Some(vec![(Snowflake(10), 2)])
+        );
+    }
+
+    #[test]
+    fn move_role_rolls_back_on_failure() {
+        let mut a = app();
+        let _ = a.update(Message::Ui(Ui::Admin(AdminUi::OpenSettings(G))));
+        ru(&mut a, RoleUi::Page(SettingsPage::Roles));
+        let pos = |a: &App, r: RoleId| {
+            a.chat
+                .guild(G)
+                .unwrap()
+                .roles
+                .iter()
+                .find(|x| x.id == r)
+                .unwrap()
+                .position
+        };
+        let before = pos(&a, mock::ROLE_GAMES_PLAYERS);
+        ru(&mut a, RoleUi::MoveRole(mock::ROLE_GAMES_PLAYERS, 1));
+        assert!(pos(&a, mock::ROLE_GAMES_PLAYERS) > before);
+        let _ = a.on_roles_done(RoleDone::Reordered {
+            guild: G,
+            previous: vec![
+                (mock::ROLE_GAMES_PLAYERS, before),
+                (mock::ROLE_GAMES_MODS, before + 1),
+            ],
+            result: Err("nope".into()),
+        });
+        assert_eq!(pos(&a, mock::ROLE_GAMES_PLAYERS), before);
     }
 
     #[test]

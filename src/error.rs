@@ -36,6 +36,10 @@ pub enum Error {
     /// on Discord's own page.
     #[error("captcha required")]
     CaptchaRequired(Box<crate::net::captcha::CaptchaChallenge>),
+    /// Discord wants a fresh two-factor check (HTTP 401, code 60003) before
+    /// the action; the ticket answers it (`net::mfa`). Not a revoked session.
+    #[error("two-factor authentication required")]
+    MfaRequired(Box<crate::net::mfa::MfaChallenge>),
     /// The operation was cancelled (task dropped, logout, shutdown).
     #[error("cancelled")]
     Cancelled,
@@ -57,6 +61,9 @@ impl Error {
             Error::Store(_) => "The local cache could not be read.".into(),
             Error::Keyring(reason) => format!("Secure storage unavailable: {reason}"),
             Error::Io(_) => "A local file could not be accessed.".into(),
+            Error::MfaRequired(_) => {
+                "Discord asks for your two-factor authentication code for this.".into()
+            }
             Error::CaptchaRequired(_) => "Discord asked for a captcha before allowing this. \
                 Open it on discord.com (or in the official app) once, then try again here."
                 .into(),

@@ -7,6 +7,7 @@ pub mod extras;
 pub mod frecency;
 pub mod gateway;
 pub mod identity;
+pub mod mfa;
 pub mod model;
 pub mod ratelimit;
 pub mod remote_auth;

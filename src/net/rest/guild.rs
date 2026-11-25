@@ -6,7 +6,9 @@
 use serde_json::{Value, json};
 
 use super::{Method, RestClient};
+use crate::auth::secrets::Secret;
 use crate::error::{Error, Result};
+use crate::net::mfa::{MFA_HEADER, MfaMethod};
 use crate::net::model::*;
 
 /// Invites made from the "Invite People" dialog last 7 days with no use
@@ -164,12 +166,166 @@ impl RestClient {
         .map(|_| ())
     }
 
-    /// `DELETE /guilds/{g}` — deletes a server (owner only).
-    pub async fn delete_guild(&self, guild: GuildId) -> Result<()> {
-        self.request(Method::DELETE, &format!("/guilds/{guild}"), None)
-            .await
-            .map(|_| ())
+    /// `DELETE /guilds/{g}` — deletes a server (owner only). With 2FA on,
+    /// the first try fails with [`Error::MfaRequired`]; the retry carries
+    /// the token of [`mfa_finish`](Self::mfa_finish).
+    pub async fn delete_guild(&self, guild: GuildId, mfa: Option<&Secret>) -> Result<()> {
+        self.send_with(
+            Method::DELETE,
+            &format!("/guilds/{guild}"),
+            |req| match mfa {
+                Some(t) => req.header(MFA_HEADER, t.expose()),
+                None => req,
+            },
+        )
+        .await
+        .map(|_| ())
     }
+
+    /// `POST /mfa/finish {ticket, mfa_type, data}` — answers a 2FA demand;
+    /// returns the token for the repeated request.
+    pub async fn mfa_finish(
+        &self,
+        ticket: &Secret,
+        method: MfaMethod,
+        code: &str,
+    ) -> Result<Secret> {
+        let v = self
+            .request(
+                Method::POST,
+                "/mfa/finish",
+                Some(json!({ "ticket": ticket.expose(), "mfa_type": method.wire(), "data": code })),
+            )
+            .await
+            .map_err(|e| match e {
+                // A wrong code is a 400 (or 401) "Invalid two-factor code".
+                Error::Http {
+                    status: 400 | 401, ..
+                } => Error::Auth("That code did not work. Check it and try again.".into()),
+                other => other,
+            })?;
+        v.get("token")
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .map(Secret::new)
+            .ok_or_else(|| Error::Protocol("2FA answer without a token".into()))
+    }
+
+    /// `PATCH /guilds/{g}/roles [{id, position}]` — new role positions.
+    pub async fn reorder_roles(&self, guild: GuildId, moves: &[(RoleId, i32)]) -> Result<()> {
+        self.request(
+            Method::PATCH,
+            &format!("/guilds/{guild}/roles"),
+            Some(reorder_body(moves)),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `PUT /channels/{c}/permissions/{id} {type, allow, deny}` — creates or
+    /// replaces a channel permission overwrite.
+    pub async fn set_overwrite(&self, channel: ChannelId, o: &PermissionOverwrite) -> Result<()> {
+        self.request(
+            Method::PUT,
+            &format!("/channels/{channel}/permissions/{}", o.id),
+            Some(overwrite_body(o)),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `DELETE /channels/{c}/permissions/{id}` — removes an overwrite.
+    pub async fn delete_overwrite(&self, channel: ChannelId, id: Snowflake) -> Result<()> {
+        self.request(
+            Method::DELETE,
+            &format!("/channels/{channel}/permissions/{id}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// `GET /guilds/{g}/bans?limit=1000[&after=…]` — every ban, paged
+    /// (at most [`BANS_MAX`]).
+    pub async fn bans(&self, guild: GuildId) -> Result<Vec<Ban>> {
+        let mut out: Vec<Ban> = Vec::new();
+        loop {
+            let mut path = format!("/guilds/{guild}/bans?limit={BANS_PAGE}");
+            if let Some(last) = out.last() {
+                path.push_str(&format!("&after={}", last.user.id));
+            }
+            let v = self.request(Method::GET, &path, None).await?;
+            let page = parse_bans(&v);
+            let full = page.len() >= BANS_PAGE;
+            out.extend(page);
+            if !full || out.len() >= BANS_MAX {
+                break;
+            }
+        }
+        out.truncate(BANS_MAX);
+        Ok(out)
+    }
+
+    /// `DELETE /guilds/{g}/bans/{u}` — revokes a ban.
+    pub async fn unban(&self, guild: GuildId, user: UserId) -> Result<()> {
+        self.request(
+            Method::DELETE,
+            &format!("/guilds/{guild}/bans/{user}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+/// Bans asked for per page (Discord's maximum).
+pub const BANS_PAGE: usize = 1000;
+/// Bans loaded at most.
+pub const BANS_MAX: usize = 10_000;
+
+/// A banned user.
+#[derive(Clone, PartialEq)]
+pub struct Ban {
+    pub user: User,
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Debug for Ban {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ban")
+            .field("user", &self.user.id)
+            .field("reason", &self.reason.as_ref().map(|_| "<set>"))
+            .finish()
+    }
+}
+
+/// `GET /guilds/{g}/bans` answer; entries without a user are skipped.
+pub fn parse_bans(v: &Value) -> Vec<Ban> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| {
+            let user: crate::net::types::WireUser =
+                serde_json::from_value(b.get("user")?.clone()).ok()?;
+            Some(Ban {
+                user: user.into(),
+                reason: b
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|r| !r.trim().is_empty())
+                    .map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+/// Body of `PUT /channels/{c}/permissions/{id}`: bits as decimal strings.
+pub fn overwrite_body(o: &PermissionOverwrite) -> Value {
+    json!({
+        "type": u8::from(o.member),
+        "allow": o.allow.to_string(),
+        "deny": o.deny.to_string(),
+    })
 }
 
 /// Body of `POST /channels/{c}/invites`.
@@ -329,7 +485,7 @@ impl ChannelEdit {
 }
 
 /// Body of `PATCH /guilds/{g}/channels`.
-pub fn reorder_body(moves: &[(ChannelId, i32)]) -> Value {
+pub fn reorder_body(moves: &[(Snowflake, i32)]) -> Value {
     Value::Array(
         moves
             .iter()
@@ -514,6 +670,34 @@ mod tests {
         assert_eq!(parse_invite_code(&json!({"code": ""})), None);
         assert_eq!(parse_invite_code(&json!({})), None);
         assert_eq!(invite_url("abc"), "https://discord.gg/abc");
+    }
+
+    #[test]
+    fn overwrite_and_ban_bodies() {
+        let o = PermissionOverwrite {
+            id: Snowflake(5),
+            member: true,
+            allow: 1024,
+            deny: 2048,
+        };
+        assert_eq!(
+            overwrite_body(&o),
+            json!({"type": 1, "allow": "1024", "deny": "2048"})
+        );
+        let v = json!([
+            {"user": {"id": "9", "username": "spam"}, "reason": "ads"},
+            {"user": {"id": "8", "username": "x"}, "reason": "  "},
+            {"reason": "no user"}
+        ]);
+        let bans = parse_bans(&v);
+        assert_eq!(bans.len(), 2);
+        assert_eq!(bans[0].reason.as_deref(), Some("ads"));
+        assert_eq!(bans[1].reason, None);
+        assert!(!format!("{:?}", bans[0]).contains("ads"));
+        assert_eq!(
+            reorder_body(&[(Snowflake(3), 2)]),
+            json!([{"id": "3", "position": 2}])
+        );
     }
 
     #[test]

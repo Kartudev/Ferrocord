@@ -201,6 +201,10 @@ pub enum Ui {
     Channel(super::channel_admin::ChannelUi),
     /// Roles page and member moderation.
     Roles(super::role_admin::RoleUi),
+    /// Bans page of Server Settings.
+    Bans(super::bans::BansUi),
+    /// Channel Permissions dialog.
+    Perms(super::channel_perms::PermsUi),
     // -- add a server
     OpenAddServer,
     CloseAddServer,
@@ -421,6 +425,8 @@ pub enum Done {
     Admin(super::guild_admin::AdminDone),
     Channel(super::channel_admin::ChannelDone),
     Roles(super::role_admin::RoleDone),
+    Bans(super::bans::BansDone),
+    Perms(super::channel_perms::PermsDone),
     /// Server icon chosen: `(path, data URI)` or the reason it was refused;
     /// `None` when the dialog was cancelled.
     IconPicked(Option<Result<(PathBuf, String), String>>),

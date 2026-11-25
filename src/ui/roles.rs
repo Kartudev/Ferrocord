@@ -10,6 +10,7 @@ use super::servers::{card, close_button, error_line, label, modal, primary, seco
 use super::settings::{note, rule, title, toggle};
 use super::theme::{self, INTER, INTER_MEDIUM, INTER_SEMIBOLD};
 use super::{El, ui};
+use crate::app::bans::BansUi;
 use crate::app::permissions::EDITABLE;
 use crate::app::role_admin::{
     MemberDialog, ModForm, ModKind, ROLE_COLORS, RoleForm, RoleUi, sorted_roles,
@@ -126,6 +127,33 @@ fn editor<'a>(app: &'a App, g: GuildId, f: &'a RoleForm) -> El<'a> {
     let p = t.palette;
     let mut col = column![].spacing(16);
     if !f.everyone {
+        let step = |ic: Icon, l: &'static str, dir: i32| -> El<'a> {
+            let can = app.role_move(g, f.role, dir).is_some();
+            button(
+                row![
+                    icon(ic, 14.0, if can { p.text_normal } else { p.text_muted }),
+                    text(l).size(t.metrics.font_s).color(if can {
+                        p.text_normal
+                    } else {
+                        p.text_muted
+                    }),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding(Padding::from([6, 10]))
+            .on_press_maybe(can.then(|| ru(RoleUi::MoveRole(f.role, dir))))
+            .style(theme::list_row(p, false))
+            .into()
+        };
+        col = col.push(
+            row![
+                Space::new().width(Length::Fill),
+                step(Icon::ArrowUp, "Move Up", 1),
+                step(Icon::ArrowDown, "Move Down", -1),
+            ]
+            .spacing(6),
+        );
         col = col.push(
             column![
                 label(app, "Role Name"),
@@ -162,6 +190,21 @@ fn editor<'a>(app: &'a App, g: GuildId, f: &'a RoleForm) -> El<'a> {
             }
         }
         col = col.push(column![label(app, "Role Colour"), first, second].spacing(8));
+        col = col.push(label(app, "Display"));
+        col = col.push(toggle(
+            app,
+            "Display role members separately from online members",
+            "Members with this role get their own group in the member list.",
+            f.hoist,
+            ru(RoleUi::Hoist(!f.hoist)),
+        ));
+        col = col.push(toggle(
+            app,
+            "Allow anyone to @mention this role",
+            "Members without Mention All Roles can still ping this role.",
+            f.mentionable,
+            ru(RoleUi::Mentionable(!f.mentionable)),
+        ));
     } else {
         col = col.push(note(
             app,
@@ -533,4 +576,106 @@ fn moderate<'a>(app: &'a App, f: &'a ModForm) -> El<'a> {
     ));
     col = col.push(buttons);
     card(app, col, 460.0)
+}
+
+// -- Bans page -----------------------------------------------------------------
+
+fn bu(b: BansUi) -> Message {
+    ui(Ui::Bans(b))
+}
+
+/// Server Settings → Bans: the banned users, a filter and "Revoke Ban".
+pub fn bans_page(app: &App) -> El<'_> {
+    let t = &app.theme;
+    let p = t.palette;
+    let page = &app.admin.bans;
+    let mut col = column![
+        title(app, "Server Ban List"),
+        note(
+            app,
+            "Banned users cannot rejoin until the ban is revoked. Bans are made from a member's \
+             right-click menu.",
+        ),
+        text_input("Search bans by username or user ID", &page.filter)
+            .on_input(|s| bu(BansUi::Filter(s)))
+            .size(t.metrics.font_m)
+            .font(INTER)
+            .padding(10)
+            .style(theme::input(p, p.bg_app)),
+        error_line(app, &page.error),
+    ]
+    .spacing(16);
+    if page.loading {
+        return col.push(note(app, "Loading bans\u{2026}")).into();
+    }
+    let shown = page.shown();
+    if shown.is_empty() {
+        let empty = if page.list.is_empty() {
+            "No bans. Nobody has been banned from this server."
+        } else {
+            "No bans match that search."
+        };
+        return col.push(note(app, empty)).into();
+    }
+    col = col.push(label(
+        app,
+        &format!(
+            "{} ban{}",
+            shown.len(),
+            if shown.len() == 1 { "" } else { "s" }
+        ),
+    ));
+    let mut list = column![].spacing(2);
+    for b in shown {
+        let busy = page.pending.contains(&b.user.id);
+        let mut who = column![
+            text(b.user.display_name().to_owned())
+                .size(t.metrics.font_m)
+                .font(INTER_MEDIUM)
+                .color(p.text_normal),
+        ]
+        .spacing(2)
+        .width(Length::Fill);
+        if b.user.display_name() != b.user.username {
+            who = who.push(
+                text(b.user.username.clone())
+                    .size(t.metrics.font_s)
+                    .color(p.text_muted),
+            );
+        }
+        who = who.push(
+            text(match &b.reason {
+                Some(r) => format!("Reason: {r}"),
+                None => "No reason given.".into(),
+            })
+            .size(t.metrics.font_s)
+            .color(p.text_secondary),
+        );
+        list = list.push(
+            container(
+                row![
+                    super::avatar(app, &b.user, 32.0),
+                    who,
+                    button(
+                        text(if busy {
+                            "Revoking\u{2026}"
+                        } else {
+                            "Revoke Ban"
+                        })
+                        .size(t.metrics.font_s)
+                        .font(INTER_MEDIUM)
+                        .color(p.danger),
+                    )
+                    .padding(Padding::from([6, 12]))
+                    .on_press_maybe((!busy).then(|| bu(BansUi::Unban(b.user.id))))
+                    .style(theme::link_button(p)),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            )
+            .padding(Padding::from([8, 10]))
+            .style(theme::rounded_bg(p.bg_sidebar, 4.0)),
+        );
+    }
+    col.push(list).into()
 }

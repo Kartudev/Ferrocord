@@ -321,6 +321,13 @@ fn channel_admin_rows(app: &App, ch: &Channel) -> Vec<Row> {
             c(ChannelUi::Move(ch.id, 1)),
         ));
     }
+    if app.can_manage_permissions(ch.id) {
+        rows.push(Row::item(
+            Icon::ShieldCheck,
+            "Edit Permissions",
+            Ui::Perms(crate::app::channel_perms::PermsUi::Open(ch.id)),
+        ));
+    }
     rows.push(Row::danger(
         Icon::Trash,
         format!("Delete {what}"),

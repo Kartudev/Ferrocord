@@ -2021,6 +2021,8 @@ mod tests {
                     color: 0,
                     position: 0,
                     permissions: 0,
+                    hoist: false,
+                    mentionable: false,
                 },
                 Role {
                     id: role,
@@ -2028,6 +2030,8 @@ mod tests {
                     color: 0,
                     position: 1,
                     permissions: 0,
+                    hoist: false,
+                    mentionable: false,
                 },
             ];
         }
@@ -2095,6 +2099,8 @@ mod tests {
                     color: 0,
                     position: 0,
                     permissions: VIEW_CHANNEL,
+                    hoist: false,
+                    mentionable: false,
                 },
             },
             &Ctx::default(),

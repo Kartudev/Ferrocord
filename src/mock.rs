@@ -220,6 +220,8 @@ fn role(id: RoleId, name: &str, color: u32, position: i32) -> Role {
         color,
         position,
         permissions: 0,
+        hoist: false,
+        mentionable: false,
     }
 }
 

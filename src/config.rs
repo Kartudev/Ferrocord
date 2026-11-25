@@ -83,6 +83,12 @@ pub enum ScreenshotScreen {
     MemberRoles,
     /// Ban dialog for a member.
     BanMember,
+    /// Server Settings → Bans.
+    ServerBans,
+    /// Channel Permissions dialog with a role override.
+    ChannelPermissions,
+    /// Delete Server asking for a two-factor code.
+    DeleteServer2fa,
     /// Joined voice channel with users, speaking ring and the
     /// "Voice Connected" panel.
     Voice,
@@ -153,6 +159,9 @@ impl ScreenshotScreen {
                 | Self::MemberMenu
                 | Self::MemberRoles
                 | Self::BanMember
+                | Self::ServerBans
+                | Self::ChannelPermissions
+                | Self::DeleteServer2fa
         )
     }
 
@@ -199,6 +208,9 @@ impl ScreenshotScreen {
             "member-menu" => Some(Self::MemberMenu),
             "member-roles" => Some(Self::MemberRoles),
             "ban-member" => Some(Self::BanMember),
+            "server-bans" => Some(Self::ServerBans),
+            "channel-permissions" => Some(Self::ChannelPermissions),
+            "delete-server-2fa" => Some(Self::DeleteServer2fa),
             "search-filters" => Some(Self::SearchFilters),
             "voice" => Some(Self::Voice),
             "call" => Some(Self::Call),

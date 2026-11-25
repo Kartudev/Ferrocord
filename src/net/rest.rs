@@ -278,6 +278,13 @@ impl RestClient {
                 // Discord answers "captcha required" with a body that has
                 // `captcha_key` instead of `message`. Ferrocord never solves
                 // it; the caller decides what the user sees.
+                // "Two factor is required": a ticket to answer, not a
+                // revoked session (both are 401).
+                if status == StatusCode::UNAUTHORIZED
+                    && let Some(c) = super::mfa::MfaChallenge::parse(&text)
+                {
+                    return Err(Error::MfaRequired(Box::new(c)));
+                }
                 if status == StatusCode::BAD_REQUEST
                     && let Some(c) = super::captcha::CaptchaChallenge::parse(&text)
                 {

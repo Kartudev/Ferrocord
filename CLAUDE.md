@@ -9,7 +9,7 @@ Video (camera / Go Live) is not implemented yet: see `docs/voice.md` §6.
 
 ## Commands
 - `cargo run -- --mock` — run with mock data (no network, in-memory stores).
-- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member> out.png` — render a screen to PNG
+- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member|server-bans|channel-permissions|delete-server-2fa> out.png` — render a screen to PNG
   (headless: `ICED_BACKEND=tiny-skia xvfb-run -a -s "-screen 0 1280x800x24" ...`).
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `cargo build --release`. `ferrocord --version` / `-V` (also `ferrocord-player`, `ferrocord-login`).
@@ -81,7 +81,9 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
   overwrites (`@everyone`, roles, member). Gate UI actions with `ChatState::channel_permissions` /
   `can_in_guild`, never with "is owner" alone; channels without View Channel are hidden. Server admin
   lives in `app/guild_admin.rs` (`Ui::Admin`), channels in `app/channel_admin.rs` (`Ui::Channel`), roles + member moderation in `app/role_admin.rs`
-  (`Ui::Roles`; hierarchy via `permissions::top_position`/`outranks`), REST in
+  (`Ui::Roles`; hierarchy via `permissions::top_position`/`outranks`), bans in `app/bans.rs` (`Ui::Bans`),
+  channel overwrites in `app/channel_perms.rs` (`Ui::Perms`). 2FA demands (401 + code 60003) are
+  `Error::MfaRequired` (`net/mfa.rs`), never a revoked session; ticket/token never logged. REST in
   `net/rest/guild.rs` (docs/protocol.md §15).
 - Composer is a `text_editor` (`app/composer.rs`): Enter sends, Shift+Enter newline; cursor columns are bytes. Container `shadow` is safe with ferroiced (tiny-skia clips it to the damage region), but
   the house style keeps the gradient header and sets no shadow (`ui/theme.rs` guard test).

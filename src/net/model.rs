@@ -239,6 +239,12 @@ pub struct Role {
     /// Permission bits (server-wide; channel overwrites are not applied).
     #[serde(default)]
     pub permissions: u64,
+    /// Members are listed separately in the member list.
+    #[serde(default)]
+    pub hoist: bool,
+    /// Anyone can @mention the role.
+    #[serde(default)]
+    pub mentionable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

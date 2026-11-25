@@ -681,6 +681,26 @@ pub fn swatch(
     }
 }
 
+/// One of the deny / neutral / allow buttons of a channel permission:
+/// filled with `active` when chosen.
+pub fn tri_button(
+    p: Palette,
+    active: Option<Color>,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| button::Style {
+        background: Some(Background::Color(match (active, status) {
+            (Some(c), _) => c,
+            (None, button::Status::Hovered) => p.bg_hover,
+            (None, _) => p.bg_app,
+        })),
+        border: Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Bordered panel inside a settings page (account card, keybind table).
 pub fn settings_card(p: Palette) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {

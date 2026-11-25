@@ -162,6 +162,90 @@ pub const EDITABLE: [(&str, &[PermissionInfo]); 5] = [
     ),
 ];
 
+/// The permissions a channel's overwrites can change, by channel kind:
+/// General for every channel, Text for text channels, Voice for voice
+/// channels, all three for a category.
+pub const CHANNEL_GENERAL: &[PermissionInfo] = &[
+    (
+        VIEW_CHANNEL,
+        "View Channel",
+        "Members can see this channel.",
+    ),
+    (
+        MANAGE_CHANNELS,
+        "Manage Channel",
+        "Change the name and topic, or delete the channel.",
+    ),
+    (
+        MANAGE_ROLES,
+        "Manage Permissions",
+        "Change this channel's permissions.",
+    ),
+    (
+        CREATE_INSTANT_INVITE,
+        "Create Invite",
+        "Invite new people through this channel.",
+    ),
+];
+pub const CHANNEL_TEXT: &[PermissionInfo] = &[
+    (
+        SEND_MESSAGES,
+        "Send Messages",
+        "Send messages in this channel.",
+    ),
+    (
+        1 << 14,
+        "Embed Links",
+        "Links shared show embedded content.",
+    ),
+    (1 << 15, "Attach Files", "Upload files and media."),
+    (
+        1 << 6,
+        "Add Reactions",
+        "Add new emoji reactions to messages.",
+    ),
+    (
+        1 << 18,
+        "Use External Emoji",
+        "Use emoji from other servers (with Nitro).",
+    ),
+    (
+        1 << 17,
+        "Mention @everyone, @here, and All Roles",
+        "Notify everyone in this channel or any role.",
+    ),
+    (
+        MANAGE_MESSAGES,
+        "Manage Messages",
+        "Delete and pin messages from other members.",
+    ),
+    (
+        1 << 16,
+        "Read Message History",
+        "Read messages sent before they could see the channel.",
+    ),
+];
+pub const CHANNEL_VOICE: &[PermissionInfo] = &[
+    (1 << 20, "Connect", "Join this voice channel."),
+    (1 << 21, "Speak", "Talk in this voice channel."),
+    (1 << 9, "Video", "Share their camera or screen."),
+    (1 << 22, "Mute Members", "Mute other members here."),
+    (1 << 23, "Deafen Members", "Deafen other members here."),
+    (1 << 24, "Move Members", "Move or disconnect members here."),
+];
+
+/// The overwrite sections shown for a channel of `kind`.
+pub fn channel_sections(kind: ChannelKind) -> Vec<(&'static str, &'static [PermissionInfo])> {
+    let general = ("General Channel Permissions", CHANNEL_GENERAL);
+    let text = ("Text Channel Permissions", CHANNEL_TEXT);
+    let voice = ("Voice Channel Permissions", CHANNEL_VOICE);
+    match kind {
+        ChannelKind::Category => vec![general, text, voice],
+        ChannelKind::Voice | ChannelKind::Stage => vec![general, voice],
+        _ => vec![general, text],
+    }
+}
+
 /// Highest role position of a member: `None` for the owner (above every
 /// role), else the top position among `roles` (0 without any).
 pub fn top_position(guild: &Guild, user: UserId, roles: &[RoleId]) -> Option<i32> {
@@ -257,6 +341,8 @@ mod tests {
             color: 0,
             position: 0,
             permissions,
+            hoist: false,
+            mentionable: false,
         }
     }
 

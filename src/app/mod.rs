@@ -4,7 +4,9 @@
 pub mod actions;
 pub mod anim;
 mod background;
+pub mod bans;
 pub mod channel_admin;
+pub mod channel_perms;
 pub mod composer;
 pub mod context;
 pub mod cosmetics;
@@ -173,6 +175,7 @@ pub struct App {
     pub admin: guild_admin::Admin,
     /// Create / edit / delete channel dialog.
     pub channel_dialog: Option<channel_admin::ChannelDialog>,
+    pub perms_dialog: Option<channel_perms::PermsForm>,
     /// Member roles / moderation dialog.
     pub member_dialog: Option<role_admin::MemberDialog>,
     pub discover: Option<servers::DiscoverState>,
@@ -326,6 +329,7 @@ impl App {
             server_dialog: None,
             admin: guild_admin::Admin::default(),
             channel_dialog: None,
+            perms_dialog: None,
             member_dialog: None,
             discover: None,
             rail: rail::RailUi::default(),
@@ -1011,6 +1015,51 @@ impl App {
                     }
                 }
             }
+            S::ServerBans | S::ChannelPermissions | S::DeleteServer2fa => {
+                let g = mock::GUILD_GAMES;
+                self.view = View::Guild {
+                    guild: g,
+                    channel: self.chat.default_channel(g),
+                };
+                match s {
+                    S::ServerBans => {
+                        let _ = self.update_admin(guild_admin::AdminUi::OpenSettings(g));
+                        let _ = self
+                            .update_roles(role_admin::RoleUi::Page(role_admin::SettingsPage::Bans));
+                        let _ = self.on_bans_done(bans::BansDone::Loaded {
+                            guild: g,
+                            result: Ok(bans::mock_bans()),
+                        });
+                    }
+                    S::ChannelPermissions => {
+                        use channel_perms::{PermsUi, RoleChoice, Tri};
+                        let _ = self.update_perms(PermsUi::Open(Snowflake(412)));
+                        let _ = self.update_perms(PermsUi::AddRole(RoleChoice {
+                            id: mock::ROLE_GAMES_PLAYERS,
+                            name: "Players".into(),
+                        }));
+                        let _ =
+                            self.update_perms(PermsUi::Set(permissions::SEND_MESSAGES, Tri::Deny));
+                        let _ =
+                            self.update_perms(PermsUi::Set(permissions::VIEW_CHANNEL, Tri::Allow));
+                    }
+                    _ => {
+                        use guild_admin::{AdminDone, AdminUi};
+                        let _ = self.update_admin(AdminUi::OpenSettings(g));
+                        let _ = self.update_admin(AdminUi::AskDelete);
+                        let _ = self.update_admin(AdminUi::DeleteTyped("Game Night".into()));
+                        if let Some(c) = crate::net::mfa::MfaChallenge::parse(
+                            r#"{"code":60003,"mfa":{"ticket":"mock","methods":[{"type":"totp","backup_codes_allowed":true}]}}"#,
+                        ) {
+                            let _ = self.on_admin_done(AdminDone::DeleteNeedsMfa {
+                                guild: g,
+                                challenge: Box::new(c),
+                            });
+                        }
+                        let _ = self.update_admin(AdminUi::MfaCode("123 45".into()));
+                    }
+                }
+            }
             S::LeaveServer => {
                 let _ = self.update_admin(guild_admin::AdminUi::AskLeave(mock::GUILD_RUST));
             }
@@ -1276,6 +1325,8 @@ impl App {
             Ui::Admin(a) => self.update_admin(a),
             Ui::Channel(c) => self.update_channel_admin(c),
             Ui::Roles(r) => self.update_roles(r),
+            Ui::Bans(b) => self.update_bans(b),
+            Ui::Perms(p) => self.update_perms(p),
             Ui::WindowFocus(f) => {
                 self.window_focused = f;
                 if f && let Some(c) = self.open_channel() {
@@ -2107,6 +2158,8 @@ impl App {
             Done::Admin(d) => self.on_admin_done(d),
             Done::Channel(d) => self.on_channel_done(d),
             Done::Roles(d) => self.on_roles_done(d),
+            Done::Bans(d) => self.on_bans_done(d),
+            Done::Perms(d) => self.on_perms_done(d),
             Done::IconPicked(r) => self.on_icon_picked(r),
             Done::DiscoverCategories(r) => {
                 if let (Some(d), Ok(c)) = (self.discover.as_mut(), r) {

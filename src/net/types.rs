@@ -368,6 +368,10 @@ pub struct WireRole {
     pub position: i32,
     #[serde(default, deserialize_with = "de_permissions")]
     pub permissions: u64,
+    #[serde(default)]
+    pub hoist: bool,
+    #[serde(default)]
+    pub mentionable: bool,
 }
 
 impl From<WireRole> for Role {
@@ -378,6 +382,8 @@ impl From<WireRole> for Role {
             color: r.color,
             position: r.position,
             permissions: r.permissions,
+            hoist: r.hoist,
+            mentionable: r.mentionable,
         }
     }
 }

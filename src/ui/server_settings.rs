@@ -18,6 +18,7 @@ use super::{El, ui};
 use crate::app::guild_admin::{AdminDialog, AdminUi, DeleteForm, IconChange, SettingsForm};
 use crate::app::role_admin::{RoleUi, SettingsPage};
 use crate::app::{App, Message, Ui};
+use crate::net::mfa::MfaMethod;
 use crate::net::rest::guild::invite_url;
 
 fn au(a: AdminUi) -> Message {
@@ -30,6 +31,10 @@ pub fn name_input_id() -> iced::widget::Id {
 
 pub fn delete_input_id() -> iced::widget::Id {
     iced::widget::Id::new("server-delete-name")
+}
+
+pub fn mfa_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("server-delete-mfa")
 }
 
 fn content_id() -> iced::widget::Id {
@@ -55,6 +60,7 @@ pub fn screen(app: &App) -> Option<El<'_>> {
             container(match app.admin.page {
                 SettingsPage::Overview => overview(app, f),
                 SettingsPage::Roles => super::roles::page(app, f.guild),
+                SettingsPage::Bans => super::roles::bans_page(app),
             })
             .max_width(theme::SETTINGS_CONTENT_MAX_W)
             .width(Length::Fill),
@@ -131,6 +137,9 @@ fn sidebar<'a>(app: &'a App, f: &'a SettingsForm) -> El<'a> {
     }
     if app.can_manage_roles(f.guild) {
         col = col.push(entry("Roles", SettingsPage::Roles));
+    }
+    if app.can_ban(f.guild) {
+        col = col.push(entry("Bans", SettingsPage::Bans));
     }
     if app.chat.owns_guild(f.guild) {
         col = col.push(Space::new().height(16));
@@ -439,6 +448,68 @@ fn delete<'a>(app: &'a App, d: &'a DeleteForm) -> El<'a> {
         .padding(10)
         .style(theme::input(p, p.bg_app));
     let ok = d.matches(&name) && !d.busy;
+    let mfa: El<'a> = match &d.mfa {
+        None => Space::new().into(),
+        Some(m) => {
+            let backup = m.method == MfaMethod::Backup;
+            let other = if backup {
+                MfaMethod::Totp
+            } else {
+                MfaMethod::Backup
+            };
+            let mut c = column![
+                label(
+                    app,
+                    if backup {
+                        "Backup code"
+                    } else {
+                        "Two-factor code"
+                    }
+                ),
+                text_input(
+                    if backup {
+                        "8-character code"
+                    } else {
+                        "6-digit code"
+                    },
+                    &m.code
+                )
+                .id(mfa_input_id())
+                .on_input(|s| au(AdminUi::MfaCode(s)))
+                .on_submit(au(AdminUi::ConfirmDelete))
+                .size(t.metrics.font_m)
+                .font(INTER)
+                .padding(10)
+                .style(theme::input(p, p.bg_app)),
+            ]
+            .spacing(8);
+            if m.challenge.allows(other) {
+                c = c.push(
+                    button(
+                        text(if backup {
+                            "Use your authenticator app instead"
+                        } else {
+                            "Use a backup code instead"
+                        })
+                        .size(t.metrics.font_s)
+                        .color(p.link),
+                    )
+                    .padding(0)
+                    .on_press(au(AdminUi::MfaUse(other)))
+                    .style(theme::link_button(p)),
+                );
+            }
+            column![
+                note(
+                    app,
+                    "Your account has two-factor authentication on. Enter a code to confirm."
+                ),
+                c
+            ]
+            .spacing(12)
+            .into()
+        }
+    };
     card(
         app,
         column![
@@ -460,6 +531,7 @@ fn delete<'a>(app: &'a App, d: &'a DeleteForm) -> El<'a> {
                 4.0
             )),
             column![label(app, "Enter server name"), input].spacing(8),
+            mfa,
             error_line(app, &d.error),
             row![
                 Space::new().width(Length::Fill),

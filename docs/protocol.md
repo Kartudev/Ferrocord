@@ -764,7 +764,7 @@ produced); keybind editing; translating Ferrocord's own UI (English only;
 the Language page sets the account locale); `USER_SETTINGS_PROTO_UPDATE`
 is not handled (the screen re-reads the proto when it opens instead).
 
-## 15. Permissions and server administration (`app/permissions.rs`, `app/guild_admin.rs`, `app/channel_admin.rs`, `app/role_admin.rs`, `net/rest/guild.rs`, `ui/server_settings.rs`, `ui/channel_admin.rs`, `ui/roles.rs`)
+## 15. Permissions and server administration (`app/permissions.rs`, `app/guild_admin.rs`, `app/channel_admin.rs`, `app/role_admin.rs`, `app/bans.rs`, `app/channel_perms.rs`, `net/rest/guild.rs`, `net/mfa.rs`, `ui/server_settings.rs`, `ui/channel_admin.rs`, `ui/channel_perms.rs`, `ui/roles.rs`)
 
 **Permissions.** Computed like the official client: the owner and
 Administrator get everything; otherwise the server-wide bits are the union of
@@ -785,7 +785,7 @@ menu as the rail's right-click, with the admin actions first:
 | Action | Shown when | Call |
 |---|---|---|
 | Invite People | Create Invite + View Channel in some channel (the open one first) | `POST /channels/{id}/invites {max_age: 604800, max_uses: 0, temporary: false}` -> `code`; the dialog shows `https://discord.gg/{code}` with Copy. |
-| Server Settings | Manage Server or Manage Roles | opens the Server Settings screen (Overview, or Roles without Manage Server). |
+| Server Settings | Manage Server, Manage Roles or Ban Members | opens the Server Settings screen on the first page the user may see (Overview, Roles, Bans). |
 | Leave Server | not the owner | confirmation, then `DELETE /users/@me/guilds/{id} {lurking: false}`. |
 
 **Server Settings** (full window, Esc closes). Overview: name (2-100
@@ -795,8 +795,19 @@ characters) and icon (PNG/JPEG/GIF/WebP `data:` URI, 4 MB, or removed).
 arrives. Delete Server (owner only) asks for the server name typed exactly,
 then `DELETE /guilds/{id}`. Leaving or deleting closes everything about the
 server and goes Home; the gateway's `GUILD_DELETE` removes it. A 403 reads
-"You do not have permission"; a two-factor requirement points to the official
-client (Ferrocord has no MFA prompt).
+"You do not have permission".
+
+**Two-factor step** (`net/mfa.rs`). With 2FA on, Discord answers the delete
+with HTTP 401, `code: 60003` and `mfa: {ticket, methods: [{type: "totp",
+backup_codes_allowed}, {type: "sms"}, …]}`. That is parsed as
+`Error::MfaRequired` (never treated as a revoked session). The dialog then
+asks for the authenticator code (6 digits) or a backup code (8 characters),
+sends `POST /mfa/finish {ticket, mfa_type: "totp" | "backup", data}` ->
+`{token}` and repeats `DELETE /guilds/{id}` with
+`X-Discord-MFA-Authorization: <token>`. A wrong code shows "That code did not
+work"; a second demand (ticket expired) asks again. Ticket and token stay in
+memory only. Accounts that only offer SMS, password or a security key, and
+other actions that hit the demand, point to the official client.
 
 **Channels** (`app/channel_admin.rs`, `ui/channel_admin.rs`), for users with
 Manage Channels (server-wide to create; in the channel to edit, move or
@@ -820,8 +831,9 @@ permissions.
 | Action | Call |
 |---|---|
 | Create Role | `POST /guilds/{id}/roles {name: "new role", permissions: "0"}`; the new role is selected. |
-| Save Changes (name, colour, permission switches) | `PATCH /guilds/{id}/roles/{role}` with the changed fields only: `name`, `color`, `permissions` (decimal string); applied locally, `GUILD_ROLE_UPDATE` confirms. |
+| Save Changes (name, colour, display switches, permission switches) | `PATCH /guilds/{id}/roles/{role}` with the changed fields only: `name`, `color`, `hoist`, `mentionable`, `permissions` (decimal string); applied locally, `GUILD_ROLE_UPDATE` confirms. |
 | Delete Role | confirmation, then `DELETE /guilds/{id}/roles/{role}`. |
+| Move Up / Move Down | the role swaps positions with its neighbour (tied positions are renumbered 1.. first; both must be below the user's top role) and the changed ones go as `PATCH /guilds/{id}/roles [{id, position}]`. Applied at once; a failure restores the old positions. |
 | Member's Roles (user right-click -> Roles, in a server) | `PUT` / `DELETE /guilds/{id}/members/{user}/roles/{role}`; applied at once, rolled back on failure. |
 
 **Member moderation** (user right-click in a server). Each item shows only
@@ -835,7 +847,25 @@ the owner). The optional reason goes in `X-Audit-Log-Reason`
 | Kick | Kick Members | `DELETE /guilds/{id}/members/{user}`. |
 | Ban (delete none / 1 h / 24 h / 7 days of messages) | Ban Members | `PUT /guilds/{id}/bans/{user} {delete_message_seconds}`. |
 
-Not implemented yet: channel permission overwrites editing, role
-reordering, hoist/mentionable switches, drag-and-drop channel reordering,
-unban list, emoji/sticker uploads, audit log, ownership transfer.
+**Bans** (Server Settings -> Bans, Ban Members). `GET /guilds/{id}/bans?limit=1000`
+(paged with `after=<last user id>`, 10 000 at most) -> `[{user, reason}]`,
+filtered locally by name or id. "Revoke Ban" sends
+`DELETE /guilds/{id}/bans/{user}` and drops the row on success.
+
+**Channel permissions** ("Edit Permissions" in a channel's or category's
+right-click menu; Manage Permissions = Manage Roles in that channel). The
+targets are `@everyone` (always listed), the roles with an overwrite (highest
+first) and the members with one; "Add a role" adds a neutral overwrite. Each
+permission of the kind's sections (General + Text, General + Voice, all three
+for a category) is denied, neutral (`/`) or allowed; only bits the user has in
+the channel can change. "Save Changes" sends
+`PUT /channels/{id}/permissions/{target} {type: 0 role / 1 member, allow, deny}`
+(decimal strings) for each new or changed overwrite and
+`DELETE /channels/{id}/permissions/{target}` for each removed one; a neutral
+`@everyone` the channel never had is not sent. Applied locally on success;
+`CHANNEL_UPDATE` confirms.
+
+Not implemented yet: adding member overwrites (existing ones can be edited),
+channel permission sync with the category, drag-and-drop reordering,
+emoji/sticker uploads, audit log, ownership transfer.
 
