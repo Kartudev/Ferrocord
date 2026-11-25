@@ -1,0 +1,175 @@
+name: Test release
+
+# Fork only. Builds a test release (Linux x86_64 tarball + .sha256, the same
+# names and layout as upstream's release.yml) that installs built from this
+# fork update to with the in-app updater: the binary is built with
+# FERRO_UPDATE_REPO=<this repo>, so it checks this fork's releases.
+#
+#   - Every 30 min: builds branch `testing` when its head changed since the
+#     last test release (merge whatever you want to try into `testing`).
+#   - Actions -> Test release -> Run workflow: builds any branch/tag/SHA.
+#
+# Versions: <upstream x.y>.<patch*1000 + run number>, always higher than the
+# previous test release, so the updater offers every new build. Releases are
+# normal (not pre-release) because the updater reads `releases/latest`, which
+# skips pre-releases; their title says "Test build". Only the newest KEEP
+# test builds are kept.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build
+        required: true
+        default: testing
+
+permissions:
+  contents: write
+
+concurrency:
+  group: test-release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TEST_BRANCH: testing
+  KEEP: 10
+
+jobs:
+  build:
+    if: github.repository != 'FerroApps/Ferrocord'
+    # Same image as release.yml (older glibc, runs on more distros).
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Decide what to build
+        id: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          last_sha="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .target_commitish 2>/dev/null || true)"
+          last_ver="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          echo "last_ver=${last_ver#v}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            sha="$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/heads/$TEST_BRANCH" | cut -f1)"
+            if [ -z "$sha" ]; then
+              echo "No branch $TEST_BRANCH, nothing to do."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            if [ "$sha" = "$last_sha" ]; then
+              echo "$TEST_BRANCH (${sha:0:7}) already released, nothing to do."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "ref=$TEST_BRANCH" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.src.outputs.skip != 'true'
+        with:
+          path: ci
+          sparse-checkout: .github/fork
+      - uses: actions/checkout@v4
+        if: steps.src.outputs.skip != 'true'
+        with:
+          ref: ${{ steps.src.outputs.ref }}
+          path: src
+          fetch-depth: 0
+
+      - name: Point the updater at this fork and set the test version
+        if: steps.src.outputs.skip != 'true'
+        id: ver
+        working-directory: src
+        env:
+          LAST: ${{ steps.src.outputs.last_ver }}
+          RUN: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Until upstream has FERRO_UPDATE_REPO, apply the patch that adds it.
+          if ! grep -q FERRO_UPDATE_REPO src/update/mod.rs; then
+            git apply --3way ../ci/.github/fork/update-repo-override.patch \
+              || { echo "::error::update-repo-override.patch no longer applies; refresh it"; exit 1; }
+          fi
+          grep -q FERRO_UPDATE_REPO src/update/mod.rs
+          base="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          IFS=. read -r ma mi pa <<< "$base"
+          new="$ma.$mi.$((pa * 1000 + RUN))"
+          # Never lower than the last test release (older branches too).
+          if [ -n "$LAST" ] && [ "$(printf '%s\n%s\n' "$new" "$LAST" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)" = "$LAST" ]; then
+            IFS=. read -r ma mi pa <<< "$LAST"
+            new="$ma.$mi.$((pa + 1))"
+          fi
+          sed -i "0,/^version = \".*\"/s//version = \"$new\"/" Cargo.toml
+          sed -i "/^name = \"ferrocord\"$/{n;s/^version = \".*\"/version = \"$new\"/}" Cargo.lock
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "Building $new from $(git rev-parse --short HEAD) (base $base)"
+
+      - name: Install system libraries
+        if: steps.src.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake libssl-dev libdbus-1-dev libxkbcommon-dev \
+            libwayland-dev libfontconfig1-dev libasound2-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.src.outputs.skip != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.src.outputs.skip != 'true'
+        with:
+          workspaces: src
+
+      - name: Build release binary
+        if: steps.src.outputs.skip != 'true'
+        working-directory: src
+        run: |
+          export CXXSTDLIB=static=stdc++
+          export RUSTFLAGS="-L native=$(dirname "$(g++ -print-file-name=libstdc++.a)")"
+          export FERRO_UPDATE_REPO="$GITHUB_REPOSITORY"
+          cargo build --release --locked
+
+      - name: Package
+        if: steps.src.outputs.skip != 'true'
+        working-directory: src
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="ferrocord-v${VERSION}-linux-x86_64"
+          mkdir -p "dist/$name/packaging" "dist/$name/licenses"
+          cp target/release/ferrocord target/release/ferrocord-player target/release/ferrocord-login README.md LICENSE "dist/$name/"
+          cp packaging/dev.ferro.ferrocord.desktop "dist/$name/packaging/dev.ferro.ferrocord.desktop"
+          cp packaging/dev.ferro.ferrocord.svg "dist/$name/packaging/dev.ferro.ferrocord.svg"
+          cp assets/fonts/OFL.txt "dist/$name/licenses/Inter-OFL.txt"
+          cp assets/icons/LICENSE "dist/$name/licenses/Lucide-ISC.txt"
+          cp THIRD_PARTY.md "dist/$name/licenses/THIRD_PARTY.md"
+          cp "$(find ~/.cargo/registry/src -path '*openh264-sys2-*/upstream/LICENSE' | head -n 1)" \
+            "dist/$name/licenses/OpenH264-BSD-2-Clause.txt"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          ls -l dist
+
+      - name: Publish the test release
+        if: steps.src.outputs.skip != 'true'
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          SHA: ${{ steps.ver.outputs.sha }}
+          REF: ${{ steps.src.outputs.ref }}
+        run: |
+          set -euo pipefail
+          name="ferrocord-v${VERSION}-linux-x86_64"
+          notes="Test build of \`$REF\` at $SHA (fork channel, not an official release)."
+          gh release create "v${VERSION}" -R "$GITHUB_REPOSITORY" --target "$SHA" --latest \
+            --title "Test build v${VERSION} ($REF)" --notes "$notes" \
+            "dist/$name.tar.gz" "dist/$name.tar.gz.sha256"
+          # Keep the newest $KEEP test builds (only releases titled "Test build").
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,name,createdAt \
+            --jq '[.[] | select(.name | startswith("Test build "))] | sort_by(.createdAt) | reverse | .['"$KEEP"':][] | .tagName' \
+          | while read -r tag; do
+              gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done

@@ -1,0 +1,220 @@
+From 57f9525f5d1a15189a6ff7e74e59bd4dd6899983 Mon Sep 17 00:00:00 2001
+From: Kartudev <146179713+Kartudev@users.noreply.github.com>
+Date: Wed, 25 Nov 2026 13:20:41 +0000
+Subject: [PATCH] feat(update): build-time FERRO_UPDATE_REPO to point the
+ updater at a fork
+
+Forks that publish their own builds (same asset names as release.yml) can
+set FERRO_UPDATE_REPO=owner/name when building; the release URL, release
+page and cargo install command then name that repository. Malformed values
+fall back to FerroApps/Ferrocord.
+---
+ docs/architecture.md  |  3 ++
+ src/app/updates.rs    |  2 +-
+ src/update/method.rs  |  2 +-
+ src/update/mod.rs     | 68 +++++++++++++++++++++++++++++++++++++++----
+ src/update/net.rs     | 14 ++++++---
+ src/update/release.rs |  4 +--
+ 6 files changed, 79 insertions(+), 14 deletions(-)
+
+diff --git a/docs/architecture.md b/docs/architecture.md
+index 5dfe26a..e60e7d0 100644
+--- a/docs/architecture.md
++++ b/docs/architecture.md
+@@ -345,6 +345,9 @@ rule; mock and screenshot mode never touch the network).
+   telemetry, no machine id. 403/429 back off silently (`retry-after` /
+   `x-ratelimit-reset`, 1 h to 24 h). `FERRO_RELEASE_API` overrides the URL
+   (same meaning as in `install.sh`; HTTPS, or HTTP on loopback for tests).
++  A fork that publishes its own builds (same asset names) builds with
++  `FERRO_UPDATE_REPO=owner/name` (compile time, `update::repo()`): the
++  URL, release page and `cargo install` command then name that repository.
+ - **When**: 10–20 s after start (jitter), then every 6 h + up to 30 min,
+   also while hidden in the tray (a sleeping `Task`, generation-checked).
+   Settings → Updates → "Check for updates automatically" (`update.auto`,
+diff --git a/src/app/updates.rs b/src/app/updates.rs
+index 7de1ee7..674e27d 100644
+--- a/src/app/updates.rs
++++ b/src/app/updates.rs
+@@ -341,7 +341,7 @@ impl App {
+         self.updater.latest = Some(update::Release {
+             tag: format!("v{next}"),
+             version: next,
+-            html_url: format!("{}/tag/v{next}", update::RELEASES_PAGE),
++            html_url: format!("{}/tag/v{next}", update::releases_page()),
+             assets: Vec::new(),
+         });
+         self.updater.method = Some(InstallMethod::Script(update::ScriptLayout {
+diff --git a/src/update/method.rs b/src/update/method.rs
+index b1baaf8..4cd8f1e 100644
+--- a/src/update/method.rs
++++ b/src/update/method.rs
+@@ -141,7 +141,7 @@ impl InstallMethod {
+ pub fn cargo_command() -> String {
+     format!(
+         "cargo install --git https://github.com/{} --locked --force",
+-        super::REPO
++        super::repo()
+     )
+ }
+ 
+diff --git a/src/update/mod.rs b/src/update/mod.rs
+index e9c5ddb..39e0da9 100644
+--- a/src/update/mod.rs
++++ b/src/update/mod.rs
+@@ -26,15 +26,49 @@ pub use version::Version;
+ 
+ use crate::store::Store;
+ 
+-/// The GitHub repository releases come from.
+-pub const REPO: &str = "FerroApps/Ferrocord";
++/// The repository official releases come from.
++pub const DEFAULT_REPO: &str = "FerroApps/Ferrocord";
+ /// Crate / binary name (release asset prefix).
+ pub const CRATE: &str = "ferrocord";
+ pub const APP_ID: &str = crate::config::APP_ID;
+-/// `releases/latest` of [`REPO`].
+-pub const API_URL: &str = "https://api.github.com/repos/FerroApps/Ferrocord/releases/latest";
++
++/// The GitHub repository (`owner/name`) releases come from:
++/// `FERRO_UPDATE_REPO` at build time, for forks that publish their own
++/// builds with the same asset names, else [`DEFAULT_REPO`]. A malformed
++/// value is ignored.
++pub fn repo() -> &'static str {
++    repo_from(option_env!("FERRO_UPDATE_REPO"))
++}
++
++fn repo_from(over: Option<&'static str>) -> &'static str {
++    over.map(str::trim)
++        .filter(|r| valid_repo(r))
++        .unwrap_or(DEFAULT_REPO)
++}
++
++/// `owner/name` with GitHub's characters only (nothing that could change
++/// the host or path of the URLs built from it).
++fn valid_repo(r: &str) -> bool {
++    let seg = |s: &str| {
++        !s.is_empty()
++            && s.len() <= 100
++            && s != "."
++            && s != ".."
++            && s.bytes()
++                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
++    };
++    matches!(r.split_once('/'), Some((owner, name)) if seg(owner) && seg(name))
++}
++
++/// `releases/latest` of [`repo()`].
++pub fn api_url() -> String {
++    format!("https://api.github.com/repos/{}/releases/latest", repo())
++}
++
+ /// Fallback release page.
+-pub const RELEASES_PAGE: &str = "https://github.com/FerroApps/Ferrocord/releases";
++pub fn releases_page() -> String {
++    format!("https://github.com/{}/releases", repo())
++}
+ 
+ /// SQLite `meta` keys.
+ pub const KEY_AUTO: &str = "update.auto";
+@@ -284,7 +318,7 @@ impl Updater {
+     pub fn release_page(&self) -> String {
+         self.latest
+             .as_ref()
+-            .map_or_else(|| RELEASES_PAGE.to_owned(), Release::page)
++            .map_or_else(releases_page, Release::page)
+     }
+ 
+     pub fn can_self_update(&self) -> bool {
+@@ -540,6 +574,28 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn update_repo_override_is_validated() {
++        assert_eq!(repo_from(None), DEFAULT_REPO);
++        assert_eq!(repo_from(Some("Someone/Ferrocord")), "Someone/Ferrocord");
++        assert_eq!(repo_from(Some(" a-b_c.d/e.f ")), "a-b_c.d/e.f");
++        for bad in [
++            "",
++            "Ferrocord",
++            "a/b/c",
++            "../x",
++            "a/..",
++            "evil.example/x?y",
++            "a b/c",
++            "a/b#c",
++            "@x/y",
++        ] {
++            assert_eq!(repo_from(Some(bad)), DEFAULT_REPO, "{bad:?}");
++        }
++        assert!(api_url().starts_with("https://api.github.com/repos/"));
++        assert!(releases_page().starts_with("https://github.com/"));
++    }
++
+     fn updater() -> Updater {
+         let mut u = Updater::new(Persisted::default(), true);
+         u.current = Version::parse("0.17.1").unwrap();
+diff --git a/src/update/net.rs b/src/update/net.rs
+index aebcc6c..083d100 100644
+--- a/src/update/net.rs
++++ b/src/update/net.rs
+@@ -86,7 +86,7 @@ impl Endpoint {
+ 
+     pub fn resolve(over: Option<&str>) -> Self {
+         let default = Self {
+-            api_url: super::API_URL.to_owned(),
++            api_url: super::api_url(),
+             loopback: false,
+         };
+         let Some(raw) = over.map(str::trim).filter(|s| !s.is_empty()) else {
+@@ -341,8 +341,11 @@ mod tests {
+ 
+     #[test]
+     fn endpoint_override_follows_install_sh() {
+-        assert_eq!(Endpoint::resolve(None).api_url, crate::update::API_URL);
+-        assert!(crate::update::API_URL.contains("/repos/FerroApps/Ferrocord/releases/latest"));
++        assert_eq!(Endpoint::resolve(None).api_url, crate::update::api_url());
++        assert!(
++            crate::update::api_url()
++                .ends_with(&format!("/repos/{}/releases/latest", crate::update::repo()))
++        );
+         let e = Endpoint::resolve(Some("http://127.0.0.1:5000/latest.json"));
+         assert!(e.loopback);
+         assert_eq!(e.api_url, "http://127.0.0.1:5000/latest.json");
+@@ -354,7 +357,10 @@ mod tests {
+             "file:///tmp/latest.json",
+             "nonsense",
+         ] {
+-            assert_eq!(Endpoint::resolve(Some(bad)).api_url, crate::update::API_URL);
++            assert_eq!(
++                Endpoint::resolve(Some(bad)).api_url,
++                crate::update::api_url()
++            );
+         }
+     }
+ 
+diff --git a/src/update/release.rs b/src/update/release.rs
+index 55707e2..33da5d1 100644
+--- a/src/update/release.rs
++++ b/src/update/release.rs
+@@ -99,7 +99,7 @@ impl Release {
+         if self.html_url.starts_with("https://github.com/") {
+             self.html_url.clone()
+         } else {
+-            super::RELEASES_PAGE.to_owned()
++            super::releases_page()
+         }
+     }
+ 
+@@ -226,7 +226,7 @@ mod tests {
+     fn a_non_github_page_falls_back_to_the_releases_list() {
+         let d = doc("v0.18.0", "").replace("https://github.com/FerroApps", "javascript:alert");
+         let r = Release::parse(d.as_bytes()).unwrap();
+-        assert_eq!(r.page(), crate::update::RELEASES_PAGE);
++        assert_eq!(r.page(), crate::update::releases_page());
+     }
+ 
+     #[test]
+-- 
+2.43.0
+
