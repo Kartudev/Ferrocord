@@ -291,6 +291,7 @@ pub struct WireChannel {
     pub nsfw: bool,
     #[serde(default)]
     pub permission_overwrites: Vec<WireOverwrite>,
+    #[serde(default)]
     pub is_message_request: bool,
     #[serde(default)]
     pub is_spam: bool,
