@@ -200,7 +200,7 @@ case ":${PATH:-}:" in
 esac
 
 say "Runtime libraries (usually already present on a desktop install):"
-say "  Linux: libssl3 (OpenSSL 3), libxkbcommon0, libxkbcommon-x11-0 (X11 sessions), libwayland-client0, libfontconfig1, libx11-6 and a GPU driver (Mesa/Vulkan; set ICED_BACKEND=tiny-skia if you have none); a Secret Service provider such as gnome-keyring or KWallet for the keyring."
+say "  Linux: libssl3 (OpenSSL 3), libxkbcommon0, libxkbcommon-x11-0 (X11 sessions), libwayland-client0, libfontconfig1, libx11-6; a Secret Service provider such as gnome-keyring or KWallet for the keyring."
 say "Video: videos play inside the chat with the bundled decoders (MP4 with H.264/AAC, WebM with VP8/VP9/Opus); no codec packages are needed, only ALSA's libasound2 for sound. Other formats offer 'Open externally'."
 say "Login: scan the QR code with the Discord app, or use 'Log in with Discord's page' (needs WebKitGTK 4.1)."
 if [ -f "$LOGIN_PATH" ] && command -v ldconfig >/dev/null 2>&1 \

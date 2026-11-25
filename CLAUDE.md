@@ -52,15 +52,18 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
 - Third-party clients violate Discord's ToS; keep the README warning intact.
 - Keep iced default features on (they carry the x11/wayland backends).
 - iced comes from the `ferroiced` fork (`[patch.crates-io]` in `Cargo.toml`):
-  iced 0.14.1 plus a tiny-skia fast path for opaque images. Patch every iced
-  crate to the same source; after changing it run `cargo update -p iced`.
+  iced 0.14.1 with tiny-skia redraw optimizations, and `wgpu` and
+  `linux-theme-detection` off by default (tiny-skia is the only renderer).
+  Patch every iced crate to the same source; after changing it run
+  `cargo update -p iced`, then check `Cargo.lock` only changed iced packages.
 - Integration tests use local mock WebSocket/HTTP servers; never real accounts.
 - Endpoints can be overridden with `FERROCORD_GATEWAY_URL`, `FERROCORD_API_URL`,
   `FERROCORD_REMOTE_AUTH_URL`, `FERROCORD_CDN_URL`.
 - Mouse position / Shift live in `app/input.rs` atomics (no per-event messages).
 - File dialog: `rfd` (xdg-portal). Clipboard files/images: `arboard`.
 - Keyring tests must use `MemoryStore` (no Secret Service in CI).
-- `main` defaults `ICED_BACKEND=tiny-skia` (wgpu costs 100-200 MB RSS).
+- No wgpu: it costs 100-200 MB RSS. Re-enable with iced's `wgpu` feature plus
+  `ICED_BACKEND=wgpu` if ever needed.
 - Login captcha: Discord's page opens in the `ferrocord-login` helper (`wry`; WebView2 / WebKitGTK 4.1,
   build needs `libwebkit2gtk-4.1-dev`). Only the helper may link the webview (CI ldd check). Never render
   hCaptcha on our own page or fake an origin; never solve captchas. REST identity headers live in `net/identity.rs`.
