@@ -1050,7 +1050,7 @@ fn notifications(app: &App) -> El<'_> {
 }
 
 /// The shortcuts Ferrocord handles (not editable).
-pub const KEYBINDS: [(&str, &str); 6] = [
+pub const KEYBINDS: [(&str, &str); 7] = [
     ("Enter", "Send the message"),
     ("Shift + Enter", "New line in the message"),
     ("Up", "Edit your last message (empty message box)"),
@@ -1059,6 +1059,7 @@ pub const KEYBINDS: [(&str, &str); 6] = [
         "Close a menu, dialog or these settings; cancel a reply or edit",
     ),
     ("Ctrl + V", "Paste text, images or files"),
+    ("Ctrl + K", "Find or start a conversation"),
     (
         "Right click",
         "Context menu of a message, user, channel or server",

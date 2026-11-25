@@ -740,6 +740,81 @@ pub fn menu_item(p: Palette, danger: bool) -> impl Fn(&Theme, button::Status) ->
     }
 }
 
+/// Header tab of the Friends page: grey pill when selected or hovered.
+pub fn tab_button(p: Palette, selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = if selected {
+            Some(Background::Color(p.bg_selected))
+        } else if hovered {
+            Some(Background::Color(p.bg_hover))
+        } else {
+            None
+        };
+        button::Style {
+            background,
+            text_color: if selected || hovered {
+                p.header_text
+            } else {
+                p.text_secondary
+            },
+            border: Border {
+                radius: Metrics::DEFAULT.radius_large.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// "Add Friend" header tab: accent pill, or accent text once selected.
+pub fn add_friend_tab(
+    p: Palette,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        if selected {
+            button::Style {
+                background: Some(Background::Color(Color {
+                    a: 0.15,
+                    ..p.accent
+                })),
+                text_color: p.accent,
+                border: Border {
+                    radius: Metrics::DEFAULT.radius_large.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        } else {
+            let mut st = primary_button(p)(t, status);
+            st.border.radius = Metrics::DEFAULT.radius_large.into();
+            st
+        }
+    }
+}
+
+/// Round action button on a friend row (message, accept, ignore, ...):
+/// red or green icon on hover for `danger` / `accept`.
+pub fn round_action(p: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(if hovered {
+                p.bg_selected
+            } else {
+                p.bg_sidebar
+            })),
+            text_color: p.text_secondary,
+            border: Border {
+                radius: 18.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Reaction pill: tinted with the accent when the user reacted.
 pub fn reaction_pill(p: Palette, me: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {

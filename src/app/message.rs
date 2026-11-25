@@ -255,6 +255,8 @@ pub enum Ui {
     Voice(super::voice::VoiceUi),
     /// User Settings screen.
     Settings(super::settings::SettingsUi),
+    /// Friends page, Message Requests, conversation switcher.
+    Friends(super::friends::FriendsUi),
 }
 
 /// Completion of a `Task`.
@@ -333,6 +335,8 @@ pub enum Done {
     ClearHighlight(MessageId),
     /// User Settings tasks.
     Settings(Box<super::settings::SettingsDone>),
+    /// Friends / Message Requests calls.
+    Friends(Box<super::friends::FriendsDone>),
     Upload {
         id: u64,
         event: UploadEvent,

@@ -193,6 +193,8 @@ pub struct ChatState {
     pub premium_type: u8,
     /// Member list of the guild whose sidebar is open.
     pub member_list: Option<super::members::MemberListState>,
+    /// Friends, friend requests, blocks and implicit relationships.
+    pub relationships: HashMap<UserId, Relationship>,
 }
 
 /// Cap on remembered presences.
@@ -260,6 +262,11 @@ impl ChatState {
         // reconnect); our own status comes from the settings.
         self.presence = r.presences.iter().copied().collect();
         self.activities = r.activities.iter().cloned().collect();
+        self.relationships = r
+            .relationships
+            .iter()
+            .map(|rel| (rel.user_id, rel.clone()))
+            .collect();
         if let Some(s) = r.my_status {
             self.my_status = s;
         }
@@ -477,6 +484,23 @@ impl ChatState {
                     self.users.insert(u.id, u.clone());
                 }
                 self.channels.insert(c.id, (**c).clone());
+            }
+            Event::RelationshipUpsert(rel, user) => {
+                if let Some(u) = user {
+                    self.users.insert(u.id, (**u).clone());
+                }
+                let mut rel = (**rel).clone();
+                // RELATIONSHIP_UPDATE may only carry the nickname change.
+                if let Some(old) = self.relationships.get(&rel.user_id)
+                    && rel.nickname.is_none()
+                    && old.kind == rel.kind
+                {
+                    rel.nickname.clone_from(&old.nickname);
+                }
+                self.relationships.insert(rel.user_id, rel);
+            }
+            Event::RelationshipRemove(id) => {
+                self.relationships.remove(id);
             }
             Event::ChannelDelete(id) => {
                 self.channels.remove(id);
@@ -928,6 +952,15 @@ impl ChatState {
             }
             return;
         }
+        // Message requests neither badge nor notify (like the official
+        // client): they wait in Friends → Message Requests.
+        if self
+            .channels
+            .get(&m.channel_id)
+            .is_some_and(|c| c.message_request)
+        {
+            return;
+        }
         let muted = self.is_channel_muted(m.channel_id)
             || m.guild_id.is_some_and(|g| self.muted_guilds.contains(&g));
         // Like the official client: a direct @mention (or a DM) always
@@ -1151,7 +1184,7 @@ impl ChatState {
         let mut v: Vec<&Channel> = self
             .channels
             .values()
-            .filter(|c| c.kind.is_private())
+            .filter(|c| c.kind.is_private() && !c.message_request)
             .collect();
         v.sort_by(|a, b| {
             b.last_message_id
@@ -1159,6 +1192,35 @@ impl ChatState {
                 .cmp(&a.last_message_id.unwrap_or(a.id))
         });
         v
+    }
+
+    /// Pending message requests (`spam`: the ones Discord filed as spam),
+    /// newest first.
+    pub fn message_requests(&self, spam: bool) -> Vec<&Channel> {
+        let mut v: Vec<&Channel> = self
+            .channels
+            .values()
+            .filter(|c| c.kind.is_private() && c.message_request && c.spam == spam)
+            .collect();
+        v.sort_by(|a, b| {
+            b.last_message_id
+                .unwrap_or(b.id)
+                .cmp(&a.last_message_id.unwrap_or(a.id))
+        });
+        v
+    }
+
+    /// The relationship with `user`, if any.
+    pub fn relationship(&self, user: UserId) -> Option<RelationshipKind> {
+        self.relationships.get(&user).map(|r| r.kind)
+    }
+
+    /// The open 1:1 DM with `user` (message requests included).
+    pub fn dm_with(&self, user: UserId) -> Option<ChannelId> {
+        self.channels
+            .values()
+            .find(|c| c.kind == ChannelKind::Dm && c.recipients == [user])
+            .map(|c| c.id)
     }
 
     /// Channel list of a guild: uncategorised channels first, then each
@@ -1868,6 +1930,8 @@ mod tests {
             recipients: vec![],
             nsfw: false,
             overwrites: vec![],
+            message_request: false,
+            spam: false,
         };
         s.apply_event(
             &Event::GuildUpsert {

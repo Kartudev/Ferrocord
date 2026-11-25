@@ -19,6 +19,7 @@ use crate::auth::secrets::Secret;
 use crate::error::{Error, Result};
 
 mod ext;
+mod friends;
 pub mod guild;
 mod settings;
 pub use settings::ProfileEdit;

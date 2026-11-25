@@ -118,6 +118,16 @@ pub enum ScreenshotScreen {
     StickersLocked,
     /// The "new version available" banner.
     UpdateBanner,
+    /// Friends page: Online tab.
+    Friends,
+    /// Friends page: Pending tab (incoming + outgoing requests).
+    FriendsPending,
+    /// Friends page: Add Friend tab after a request was sent.
+    FriendsAdd,
+    /// Message Requests page.
+    MessageRequests,
+    /// "Find or start a conversation" with a query.
+    Switcher,
 }
 
 impl ScreenshotScreen {
@@ -217,6 +227,11 @@ impl ScreenshotScreen {
             "emoji-locked" => Some(Self::EmojiLocked),
             "stickers-locked" => Some(Self::StickersLocked),
             "update-banner" => Some(Self::UpdateBanner),
+            "friends" => Some(Self::Friends),
+            "friends-pending" => Some(Self::FriendsPending),
+            "friends-add" => Some(Self::FriendsAdd),
+            "message-requests" => Some(Self::MessageRequests),
+            "switcher" => Some(Self::Switcher),
             _ => None,
         }
     }

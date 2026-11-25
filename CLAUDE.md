@@ -9,7 +9,7 @@ Video (camera / Go Live) is not implemented yet: see `docs/voice.md` §6.
 
 ## Commands
 - `cargo run -- --mock` — run with mock data (no network, in-memory stores).
-- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member> out.png` — render a screen to PNG
+- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member|friends|friends-pending|friends-add|message-requests|switcher> out.png` — render a screen to PNG
   (headless: `ICED_BACKEND=tiny-skia xvfb-run -a -s "-screen 0 1280x800x24" ...`).
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `cargo build --release`. `ferrocord --version` / `-V` (also `ferrocord-player`, `ferrocord-login`).

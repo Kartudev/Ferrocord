@@ -33,6 +33,9 @@ pub const DM_ALICE: ChannelId = Snowflake(600);
 pub const DM_BOB: ChannelId = Snowflake(601);
 pub const DM_GROUP: ChannelId = Snowflake(602);
 pub const DM_EVE: ChannelId = Snowflake(603);
+/// Message requests: one from Marco, one Discord filed as spam.
+pub const DM_REQUEST: ChannelId = Snowflake(604);
+pub const DM_SPAM: ChannelId = Snowflake(605);
 
 pub const ROLE_MOD: RoleId = Snowflake(900);
 pub const ROLE_MEMBER: RoleId = Snowflake(901);
@@ -42,7 +45,7 @@ pub const ROLE_GAMES_MODS: RoleId = Snowflake(4901);
 pub const ROLE_GAMES_PLAYERS: RoleId = Snowflake(4902);
 pub const MOD_COLOR: u32 = 0x2ecc71;
 
-const NAMES: [(&str, &str); 7] = [
+const NAMES: [(&str, &str); 11] = [
     ("", ""),
     ("ferris_fan", "Ferris Fan"),
     ("alice.dev", "Alice"),
@@ -50,6 +53,10 @@ const NAMES: [(&str, &str); 7] = [
     ("carol_codes", "Carol"),
     ("clippy_bot", "Clippy Bot"),
     ("eve", "Eve"),
+    ("ruby.rs", "Ruby"),
+    ("zed_dev", "Zed"),
+    ("marco.polo", "Marco"),
+    ("free_nitro_420", "Free Nitro"),
 ];
 
 /// Users already sitting in the mock voice channels.
@@ -118,6 +125,8 @@ fn ch(
         recipients: vec![],
         nsfw: false,
         overwrites: vec![],
+        message_request: false,
+        spam: false,
     }
 }
 
@@ -303,6 +312,14 @@ pub fn ready() -> ReadyData {
     dm(DM_BOB, Dm, "", vec![3]);
     dm(DM_GROUP, GroupDm, "Weekend plans", vec![4, 5, 6]);
     dm(DM_EVE, Dm, "", vec![6]);
+    dm(DM_REQUEST, Dm, "", vec![9]);
+    dm(DM_SPAM, Dm, "", vec![10]);
+    for c in channels.iter_mut() {
+        if c.id == DM_REQUEST || c.id == DM_SPAM {
+            c.message_request = true;
+            c.spam = c.id == DM_SPAM;
+        }
+    }
 
     // Last message ids: everything has recent activity.
     let mut read_states = Vec::new();
@@ -381,7 +398,8 @@ pub fn ready() -> ReadyData {
             guild(GUILD_CAFE, "Open Source Café", vec![]),
         ],
         channels,
-        users: (2..=6).map(user).collect(),
+        users: (2..=10).map(user).collect(),
+        relationships: relationships(),
         read_states,
         guild_order: vec![GUILD_RUST, GUILD_ICED, GUILD_LINUX, GUILD_GAMES, GUILD_CAFE],
         my_roles: vec![(GUILD_RUST, vec![ROLE_MEMBER])],
@@ -402,6 +420,28 @@ pub fn ready() -> ReadyData {
         guild_folders: vec![],
         channel_notify: vec![],
     }
+}
+
+/// Friends (Alice, Bob, Carol, Eve), an incoming request (Ruby), an
+/// outgoing one (Zed) and an implicit relationship (Marco).
+pub fn relationships() -> Vec<Relationship> {
+    use RelationshipKind::*;
+    [
+        (2, Friend),
+        (3, Friend),
+        (4, Friend),
+        (6, Friend),
+        (7, Incoming),
+        (8, Outgoing),
+        (9, Implicit),
+    ]
+    .into_iter()
+    .map(|(n, kind)| Relationship {
+        user_id: Snowflake(n),
+        kind,
+        nickname: None,
+    })
+    .collect()
 }
 
 /// Member list of the mock Rust server, as the server would send it.
@@ -613,6 +653,15 @@ pub fn history(channel: ChannelId) -> Vec<Message> {
         ],
         DM_BOB => long_history(DM_BOB),
         DM_EVE => vec![gm(DM_EVE, 4400, 0, 6, &[], "see you at the meetup")],
+        DM_REQUEST => vec![gm(
+            DM_REQUEST,
+            30,
+            0,
+            9,
+            &[],
+            "Hey! We met at the Rust meetup, mind if I ask about your iced fork?",
+        )],
+        DM_SPAM => vec![gm(DM_SPAM, 12, 0, 10, &[], "FREE NITRO click here!!!")],
         _ => general(channel),
     }
 }

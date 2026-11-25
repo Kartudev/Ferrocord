@@ -82,7 +82,7 @@ shared `Decompress` context. The buffer is capped at 64 MiB.
 `MESSAGE_ACK`, `CHANNEL_CREATE/UPDATE/DELETE`, `THREAD_CREATE/UPDATE/DELETE`,
 `GUILD_CREATE/UPDATE/DELETE`, `MESSAGE_REACTION_ADD/REMOVE/REMOVE_ALL/REMOVE_EMOJI`,
 `PRESENCE_UPDATE`, `GUILD_MEMBER_LIST_UPDATE`, `GUILD_EMOJIS_UPDATE`, `GUILD_STICKERS_UPDATE`,
-`GUILD_ROLE_CREATE/UPDATE/DELETE`, `GUILD_MEMBER_UPDATE` (member roles). Unknown events are ignored; a malformed known
+`GUILD_ROLE_CREATE/UPDATE/DELETE`, `GUILD_MEMBER_UPDATE` (member roles), `RELATIONSHIP_ADD/UPDATE/REMOVE`. Unknown events are ignored; a malformed known
 event is logged (without its payload) and the connection stays up.
 
 ### User-account READY quirks
@@ -100,6 +100,9 @@ capability flags produce:
 * `merged_members[i]` aligned with `guilds[i]` for the current user's roles
   (role mentions, author colours). `READY_SUPPLEMENTAL` adds other members.
 * Unavailable guilds are skipped until their `GUILD_CREATE`.
+* `relationships` (type 1 friend, 2 blocked, 3 incoming, 4 outgoing,
+  5 implicit; inline `user`) feed the Friends page; DMs with
+  `is_message_request` / `is_spam` go to Message Requests, not the DM list.
 
 Message timestamps come from the snowflake id (`id >> 22` + Discord epoch),
 so no ISO-8601 parsing is needed on the hot path.
@@ -293,6 +296,24 @@ bar itself and popups rely on their border, as in the official client.
 
 Fonts: Inter (OFL) and Twemoji (CC-BY 4.0, COLRv0 font) embedded. Icons: Lucide
 (ISC), plus our own `gif.svg` in the same style. No Discord logos, fonts or artwork are used.
+
+### Friends, Message Requests, switcher (`app/friends.rs`, `ui/friends.rs`, `net/rest/friends.rs`)
+
+* Friends page (Home with no DM open): Online / All / Implicit / Pending
+  tabs with a name or username search, and Add Friend. Pending lists
+  incoming requests first; the red badge (Friends entry, Pending tab)
+  counts incoming requests. Removing a friend asks once in the row.
+* Calls: `POST /users/@me/relationships {username, discriminator: null}`
+  (Add Friend; a 400 means no such user, a captcha demand is shown, never
+  solved), `PUT /users/@me/relationships/{id} {}` (accept / add implicit),
+  `DELETE /users/@me/relationships/{id}` (remove, ignore, cancel),
+  `POST /users/@me/channels {recipients}` (Message, when no DM exists).
+* Message Requests: Requests / Spam tabs; Accept is
+  `PUT /channels/{id}/recipients/@me {consent_status: 2}`, Ignore is
+  `DELETE /channels/{id}/recipients/@me`. Messages in a request neither
+  badge nor notify. Not verified against a live account yet.
+* "Find or start a conversation" (button or Ctrl+K): DMs, friends without a
+  DM, text channels and servers; Enter opens the first result.
 
 ## 8. Round 2 behaviour notes
 

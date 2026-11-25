@@ -39,6 +39,7 @@ pub fn view(app: &App) -> El<'_> {
             composer(app, c)
         ]
         .into(),
+        None if matches!(app.view, View::Home(None)) => super::friends::view(app),
         None => empty(app),
     };
     container(body)

@@ -659,6 +659,9 @@ impl App {
         if self.lightbox.take().is_some() {
             return Task::none();
         }
+        if self.friends.switcher.take().is_some() || self.friends.confirm_remove.take().is_some() {
+            return Task::none();
+        }
         if self.emoji_picker.take().is_some()
             || self.gif_picker.take().is_some()
             || self.sticker_picker.take().is_some()

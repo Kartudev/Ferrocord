@@ -111,6 +111,11 @@ pub enum Event {
     /// CALL_CREATE / CALL_UPDATE.
     Call(Box<CallState>),
     CallDelete(ChannelId),
+    /// RELATIONSHIP_ADD / RELATIONSHIP_UPDATE (an update carries no user:
+    /// the known one is kept).
+    RelationshipUpsert(Box<Relationship>, Option<Box<User>>),
+    /// RELATIONSHIP_REMOVE: no relationship with this user any more.
+    RelationshipRemove(UserId),
     /// The token was rejected (close code 4004). The session must be cleared.
     AuthFailed,
     /// Unrecoverable gateway error (bad intents, invalid API version, ...).

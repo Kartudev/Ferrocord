@@ -73,9 +73,11 @@ pub enum Icon {
     ExternalLink,
     Star,
     StarFilled,
+    Mail,
+    UserPlus,
 }
 
-const ALL: [(Icon, &[u8]); 65] = [
+const ALL: [(Icon, &[u8]); 67] = [
     (
         Icon::AtSign,
         include_bytes!("../../assets/icons/at-sign.svg"),
@@ -272,6 +274,11 @@ const ALL: [(Icon, &[u8]); 65] = [
     (
         Icon::StarFilled,
         include_bytes!("../../assets/icons/star-filled.svg"),
+    ),
+    (Icon::Mail, include_bytes!("../../assets/icons/mail.svg")),
+    (
+        Icon::UserPlus,
+        include_bytes!("../../assets/icons/user-plus.svg"),
     ),
 ];
 

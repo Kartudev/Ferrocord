@@ -446,6 +446,8 @@ impl App {
                 recipients: vec![],
                 nsfw: false,
                 overwrites: vec![],
+                message_request: false,
+                spam: false,
             };
             return Task::done(Message::Done(Done::Channel(ChannelDone::Created {
                 guild,
@@ -782,6 +784,8 @@ mod tests {
             recipients: vec![],
             nsfw: false,
             overwrites: vec![],
+            message_request: false,
+            spam: false,
         };
         let _ = a.on_channel_done(ChannelDone::Created {
             guild: G,
