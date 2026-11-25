@@ -26,6 +26,7 @@ pub mod members;
 pub mod message;
 pub mod nitro;
 pub mod notify;
+mod opener;
 pub mod panels;
 pub mod permissions;
 pub mod plugins;
@@ -1311,7 +1312,7 @@ impl App {
                 if !(url.starts_with("https://") || url.starts_with("http://")) || self.cfg.mock {
                     return Task::none();
                 }
-                Task::perform(open_url(url), |_| Message::Done(Done::Ignored))
+                Task::perform(opener::open(url), |_| Message::Done(Done::Ignored))
             }
             Ui::Logout => self.logout(),
             Ui::Voice(v) => self.update_voice(v),
@@ -1799,7 +1800,12 @@ impl App {
             tasks.push(self.sync_members());
             tasks.push(self.load_user_settings());
         }
-        if matches!(ev, Event::MessageCreate(_) | Event::MemberList(_)) {
+        // Link previews arrive in a MESSAGE_UPDATE a few seconds after the
+        // message itself (Discord unfurls the URL), so their thumbnails are
+        // fetched then rather than whenever the next message comes in.
+        if matches!(ev, Event::MessageCreate(_) | Event::MemberList(_))
+            || matches!(ev, Event::MessageUpdate(p) if update_brings_media(&p))
+        {
             tasks.push(self.request_images());
         }
         for fx in effects {
@@ -2759,32 +2765,11 @@ fn notify(n: state::Notification, mock: bool, sound: bool) -> Task<Message> {
     )
 }
 
-async fn open_url(url: String) {
-    let _ = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "linux")]
-        let cmd = "xdg-open";
-        #[cfg(target_os = "macos")]
-        let cmd = "open";
-        #[cfg(target_os = "windows")]
-        let cmd = "explorer";
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        let cmd = "xdg-open";
-        // Wait for the opener so it is reaped (xdg-open/open return as soon
-        // as the browser has been handed the URL).
-        match std::process::Command::new(cmd)
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let _ = child.wait();
-            }
-            Err(e) => tracing::warn!(error = %e, "could not launch URL opener"),
-        }
-    })
-    .await;
+/// Whether a MESSAGE_UPDATE carries media to fetch: new embeds (link
+/// previews, Twitter/X photos) or attachments.
+fn update_brings_media(p: &crate::net::model::MessagePatch) -> bool {
+    p.embeds.as_ref().is_some_and(|e| !e.is_empty())
+        || p.attachments.as_ref().is_some_and(|a| !a.is_empty())
 }
 
 fn save_png(path: &std::path::Path, shot: &iced::window::Screenshot) -> crate::error::Result<()> {
@@ -2800,6 +2785,27 @@ fn save_png(path: &std::path::Path, shot: &iced::window::Screenshot) -> crate::e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_preview_updates_fetch_their_media() {
+        use crate::net::model::{Embed, MessagePatch};
+        let edit = MessagePatch {
+            content: Some("edited".into()),
+            edited: true,
+            ..Default::default()
+        };
+        assert!(!update_brings_media(&edit));
+        let cleared = MessagePatch {
+            embeds: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!update_brings_media(&cleared));
+        let unfurled = MessagePatch {
+            embeds: Some(vec![Embed::default()]),
+            ..Default::default()
+        };
+        assert!(update_brings_media(&unfurled));
+    }
 
     #[test]
     fn ctrl_q_quits() {
