@@ -340,7 +340,9 @@ impl FerroTheme {
 
 // -- typography ---------------------------------------------------------------
 
-pub const INTER: Font = Font::with_name("Inter");
+/// Family name of the bundled UI font ([`FONT_FILES`]).
+pub const UI_FAMILY: &str = "Inter";
+pub const INTER: Font = Font::with_name(UI_FAMILY);
 pub const INTER_MEDIUM: Font = Font {
     weight: font::Weight::Medium,
     ..INTER
@@ -364,12 +366,15 @@ pub const MONO: Font = Font::MONOSPACE;
 /// face can shadow it. Loaded by `emoji_font::install`.
 pub const TWEMOJI: &[u8] = include_bytes!("../../assets/fonts/Twemoji.ttf");
 
-/// Embedded font files (SIL OFL 1.1).
-pub const FONT_FILES: [&[u8]; 4] = [
+/// Embedded UI font files (Inter 4.0, SIL OFL 1.1): every weight and style
+/// the views ask for, so text never depends on the system's fonts. Loaded
+/// zero-copy, before the first frame, by `emoji_font::install`.
+pub const FONT_FILES: [&[u8]; 5] = [
     include_bytes!("../../assets/fonts/Inter-Regular.otf"),
     include_bytes!("../../assets/fonts/Inter-Medium.otf"),
     include_bytes!("../../assets/fonts/Inter-SemiBold.otf"),
     include_bytes!("../../assets/fonts/Inter-Bold.otf"),
+    include_bytes!("../../assets/fonts/Inter-Italic.otf"),
 ];
 
 // -- styles -------------------------------------------------------------------
@@ -733,6 +738,81 @@ pub fn menu_item(p: Palette, danger: bool) -> impl Fn(&Theme, button::Status) ->
             text_color: fg,
             border: Border {
                 radius: Metrics::DEFAULT.radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Header tab of the Friends page: grey pill when selected or hovered.
+pub fn tab_button(p: Palette, selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = if selected {
+            Some(Background::Color(p.bg_selected))
+        } else if hovered {
+            Some(Background::Color(p.bg_hover))
+        } else {
+            None
+        };
+        button::Style {
+            background,
+            text_color: if selected || hovered {
+                p.header_text
+            } else {
+                p.text_secondary
+            },
+            border: Border {
+                radius: Metrics::DEFAULT.radius_large.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// "Add Friend" header tab: accent pill, or accent text once selected.
+pub fn add_friend_tab(
+    p: Palette,
+    selected: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        if selected {
+            button::Style {
+                background: Some(Background::Color(Color {
+                    a: 0.15,
+                    ..p.accent
+                })),
+                text_color: p.accent,
+                border: Border {
+                    radius: Metrics::DEFAULT.radius_large.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        } else {
+            let mut st = primary_button(p)(t, status);
+            st.border.radius = Metrics::DEFAULT.radius_large.into();
+            st
+        }
+    }
+}
+
+/// Round action button on a friend row (message, accept, ignore, ...):
+/// red or green icon on hover for `danger` / `accept`.
+pub fn round_action(p: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(if hovered {
+                p.bg_selected
+            } else {
+                p.bg_sidebar
+            })),
+            text_color: p.text_secondary,
+            border: Border {
+                radius: 18.0.into(),
                 ..Default::default()
             },
             ..Default::default()

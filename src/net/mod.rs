@@ -59,6 +59,12 @@ pub enum Event {
     },
     ChannelUpsert(Box<Channel>, Vec<User>),
     ChannelDelete(ChannelId),
+    /// CHANNEL_RECIPIENT_ADD / _REMOVE: someone joined or left a group DM.
+    ChannelRecipient {
+        channel_id: ChannelId,
+        user: Box<User>,
+        added: bool,
+    },
     GuildUpsert {
         guild: Box<Guild>,
         channels: Vec<Channel>,
@@ -68,6 +74,16 @@ pub enum Event {
         voice_states: Vec<VoiceState>,
     },
     GuildDelete(GuildId),
+    /// GUILD_ROLE_CREATE / GUILD_ROLE_UPDATE.
+    RoleUpsert {
+        guild_id: GuildId,
+        role: Role,
+    },
+    /// GUILD_ROLE_DELETE.
+    RoleDelete {
+        guild_id: GuildId,
+        role_id: RoleId,
+    },
     Reaction(ReactionEvent),
     /// PRESENCE_UPDATE (friends, and members of subscribed guilds).
     PresenceUpdate {
@@ -101,6 +117,11 @@ pub enum Event {
     /// CALL_CREATE / CALL_UPDATE.
     Call(Box<CallState>),
     CallDelete(ChannelId),
+    /// RELATIONSHIP_ADD / RELATIONSHIP_UPDATE (an update carries no user:
+    /// the known one is kept).
+    RelationshipUpsert(Box<Relationship>, Option<Box<User>>),
+    /// RELATIONSHIP_REMOVE: no relationship with this user any more.
+    RelationshipRemove(UserId),
     /// The token was rejected (close code 4004). The session must be cleared.
     AuthFailed,
     /// Unrecoverable gateway error (bad intents, invalid API version, ...).

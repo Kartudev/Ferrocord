@@ -17,7 +17,7 @@ use super::{
 };
 use crate::app::actions::{composer_id, edit_id, search_id};
 use crate::app::composer;
-use crate::app::emoji::PickerTarget;
+use crate::app::emoji::{self, PickerTarget};
 use crate::app::lightbox::{Lightbox, proxy_resized};
 use crate::app::panels::Popover;
 use crate::app::state::continues_group;
@@ -39,6 +39,7 @@ pub fn view(app: &App) -> El<'_> {
             composer(app, c)
         ]
         .into(),
+        None if matches!(app.view, View::Home(None)) => super::friends::view(app),
         None => empty(app),
     };
     container(body)
@@ -651,42 +652,11 @@ fn reply_header<'a>(
 }
 
 fn reactions_row<'a>(app: &'a App, c: &'a Channel, m: &'a model::Message) -> El<'a> {
-    let p = app.theme.palette;
-    let mut pills: Vec<El<'a>> = Vec::new();
-    for re in &m.reactions {
-        let face: El<'a> = match re.emoji.id {
-            Some(id) => match (
-                app.emoji_anim(id, re.emoji.animated),
-                app.image(&emoji_url(&app.cfg.cdn_url, id)),
-            ) {
-                (Some(a), _) => message_anim(app, a, 18.0, 18.0)
-                    .content_fit(iced::ContentFit::Contain)
-                    .into(),
-                (None, Some(h)) => iced::widget::image(h.clone()).width(18).height(18).into(),
-                (None, None) => text(format!(":{}:", re.emoji.name))
-                    .size(12)
-                    .color(p.text_muted)
-                    .into(),
-            },
-            None => emoji_text(re.emoji.name.clone(), 16.0, p.text_normal, INTER, false),
-        };
-        let pill = button(
-            row![
-                face,
-                text(re.count.to_string())
-                    .size(14)
-                    .font(INTER_MEDIUM)
-                    .color(if re.me { p.link } else { p.text_secondary }),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        )
-        .padding(Padding::from([2, 6]))
-        .on_press(ui(Ui::ToggleReaction(m.id, re.emoji.clone())))
-        .style(theme::reaction_pill(p, re.me));
-        pills.push(pill.into());
-    }
-    let _ = c;
+    let pills: Vec<El<'a>> = m
+        .reactions
+        .iter()
+        .map(|re| super::reactions::pill(app, c.id, m, re))
+        .collect();
     row(pills)
         .spacing(4)
         .align_y(Alignment::Center)
@@ -706,14 +676,46 @@ fn action_bar<'a>(app: &'a App, c: &'a Channel, m: &'a model::Message) -> El<'a>
             .style(theme::icon_button(p))
             .into()
     };
-    let mut r = row![tool(
+    // One-click reactions with the most recently used emoji, like the
+    // official client's hover bar.
+    let access = app.nitro_access();
+    let quick = emoji::quick_reactions(&app.recent_emoji, &app.chat.guilds, &access);
+    let has_quick = !quick.is_empty();
+    let mut r = row![].spacing(0).align_y(Alignment::Center);
+    for item in quick {
+        let (face, e): (El<'a>, model::Emoji) = match item {
+            emoji::RecentItem::Unicode(s) => (
+                emoji_text(s, 18.0, p.text_normal, INTER, false),
+                model::Emoji::unicode(s),
+            ),
+            emoji::RecentItem::Custom(_, ce, _) => (
+                match app.image(&emoji_url(&app.cfg.cdn_url, ce.id)) {
+                    Some(h) => iced::widget::image(h.clone()).width(20).height(20).into(),
+                    None => text(":").size(14).color(p.text_muted).into(),
+                },
+                model::Emoji::custom(ce),
+            ),
+        };
+        r = r.push(
+            button(container(face).center(28))
+                .padding(0)
+                .on_press(ui(Ui::ToggleReaction(m.id, e)))
+                .style(theme::icon_button(p)),
+        );
+    }
+    if has_quick {
+        r = r.push(
+            container(container(Space::new().width(1).height(20)).style(theme::bg(p.border)))
+                .padding(Padding::from([0, 4])),
+        );
+    }
+    r = r.push(tool(
         Icon::SmilePlus,
         Ui::OpenEmojiPicker(PickerTarget::Reaction {
             channel: c.id,
-            message: m.id
-        })
-    )]
-    .spacing(0);
+            message: m.id,
+        }),
+    ));
     if mine && matches!(m.kind, 0 | 19) {
         r = r.push(tool(Icon::Pencil, Ui::StartEdit(m.id)));
     }

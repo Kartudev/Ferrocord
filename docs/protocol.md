@@ -40,7 +40,7 @@ states or remote auth.
 | 1 | HEARTBEAT | ↔ | Sent every `heartbeat_interval`; answered immediately when the server asks. |
 | 2 | IDENTIFY | → | Token, `capabilities`, `properties` (honest: `browser = "Ferrocord"`; same object as `X-Super-Properties`), presence. |
 | 3 | PRESENCE_UPDATE | → | Own status (`online`/`idle`/`dnd`/`invisible`) plus the custom status as an activity (`{type: 4, name: "Custom Status", state, emoji}`); also saved in the settings proto (§14). IDENTIFY carries the same presence. |
-| 14 | GUILD_SUBSCRIPTIONS | → | Member list ranges `{guild_id, typing, threads, channels: {id: [[0,99]]}}`, sent while the member sidebar is open. |
+| 14 | GUILD_SUBSCRIPTIONS | → | Member list ranges `{guild_id, typing, threads, activities, channels: {id: [[0,99], ...]}}` for the open channel, sent while the member sidebar is open (at most three 100-row ranges, see below). |
 | 6 | RESUME | → | `{ token, session_id, seq }` on the `resume_gateway_url`. |
 | 7 | RECONNECT | ← | Close with 4000 and resume. |
 | 9 | INVALID_SESSION | ← | `d = true` → resume; `false` → reset session, wait 1–5 s, identify. |
@@ -52,10 +52,55 @@ states or remote auth.
 The app records what it wants (own status, member list ranges) in a shared
 `GatewayHandle`; the runner sends op 3 / op 14 once the session is READY and
 again after every reconnect or resume. Identical requests are not re-sent.
-Member list ranges grow in steps of 100 rows up to 500 (`app/members.rs`);
-`GUILD_MEMBER_LIST_UPDATE` ops (SYNC, INSERT, UPDATE, DELETE, INVALIDATE) are
-applied by a bounded sparse list (at most 1500 rows). Presence comes from
-READY `presences` (friends), `PRESENCE_UPDATE`, and member list items.
+Presence comes from READY `presences` (friends), `PRESENCE_UPDATE`, and member
+list items.
+
+### Member list (`app/members.rs`, `ui/members.rs`)
+
+Like the official client:
+
+* **Ranges follow the scroll position.** The sidebar always subscribes to
+  `[0, 99]` plus the 100-row chunks at the visible window (with a 30-row
+  preload margin), three ranges at most: `[[0,99]]` at the top,
+  `[[0,99],[2500,2599]]` (and the next chunk near its end) deep in a big list.
+  A scroll that changes the chunks re-sends op 14 for the same channel.
+* **The list knows its length, not its rows.** Every
+  `GUILD_MEMBER_LIST_UPDATE` carries `groups` (`[{id, count}]`: hoisted
+  roles, `online`, `offline`); total rows = members + one header per group.
+  Rows are kept in a sparse map and only inside the subscribed ranges, so a
+  100 000-member server costs as much as a small one. Discord itself leaves the
+  offline group out for servers of about 1000 members or more (same as the
+  official client: only online members are listed there).
+* **Ops**: `SYNC {range, items}` fills a range; `INSERT {index, item}` /
+  `DELETE {index}` shift every later row by one (a moved member is a DELETE
+  plus an INSERT in one update); `UPDATE {index, item}` replaces a row;
+  `INVALIDATE {range}` forgets a range (it shows placeholders again). An item
+  we cannot read keeps its slot (an empty item), and an unreadable item never
+  drops the whole update: one odd member used to fail the event, so a whole
+  SYNC (every member of a range) was lost.
+* **List ids.** `id` is `everyone` or a hash of the channel's view
+  permissions; channels with different permissions have different lists.
+  After a channel switch in the same server the rows stay until the first
+  SYNC: a SYNC of another list replaces them, and later updates of the old
+  list are ignored. Ops for a list that never had a SYNC are ignored.
+* **Drawing** is virtualised (`ui::members::ROWS`): member rows are 44 px and
+  group headers 40 px, so the visible window is computed from the scroll
+  offset; rows not loaded yet are grey skeleton rows of the same height.
+
+Fixed after 0.20.0 (user report "not all members show up"): the old list asked
+for at most rows 0-499 (`ranges_for` capped at five ranges) and showed only
+loaded rows, so members past row 500 never appeared; it kept the previous
+channel's rows and applied the old list's updates after a channel switch
+(members of a private channel mixed with `everyone`); it dropped INSERTs once
+1500 rows existed (every later row one place off); and one unreadable member
+item failed the whole update.
+
+**Group DMs** have no member list subscription: the panel lists the channel's
+`recipients` (plus the current user), kept current by
+`CHANNEL_RECIPIENT_ADD` / `CHANNEL_RECIPIENT_REMOVE` (`{channel_id, user}`;
+previously ignored, so people added to a group only showed after a restart).
+A recipient id without a user object gets an "Unknown User" placeholder until
+a payload carries the user, instead of disappearing.
 
 ### Heartbeat, zombies, reconnect
 
@@ -80,8 +125,11 @@ shared `Decompress` context. The buffer is capped at 64 MiB.
 `READY`, `READY_SUPPLEMENTAL`, `RESUMED`, `MESSAGE_CREATE`, `MESSAGE_UPDATE`
 (partial), `MESSAGE_DELETE`, `MESSAGE_DELETE_BULK`, `TYPING_START`,
 `MESSAGE_ACK`, `CHANNEL_CREATE/UPDATE/DELETE`, `THREAD_CREATE/UPDATE/DELETE`,
-`GUILD_CREATE/UPDATE/DELETE`, `MESSAGE_REACTION_ADD/REMOVE/REMOVE_ALL/REMOVE_EMOJI`,
-`PRESENCE_UPDATE`, `GUILD_MEMBER_LIST_UPDATE`, `GUILD_EMOJIS_UPDATE`, `GUILD_STICKERS_UPDATE`. Unknown events are ignored; a malformed known
+`CHANNEL_RECIPIENT_ADD/REMOVE`, `GUILD_CREATE/UPDATE/DELETE`,
+`MESSAGE_REACTION_ADD/REMOVE/REMOVE_ALL/REMOVE_EMOJI` (with `burst`),
+`PRESENCE_UPDATE`, `GUILD_MEMBER_LIST_UPDATE`, `GUILD_EMOJIS_UPDATE`, `GUILD_STICKERS_UPDATE`,
+`GUILD_ROLE_CREATE/UPDATE/DELETE`, `GUILD_MEMBER_UPDATE` (member roles),
+`RELATIONSHIP_ADD/UPDATE/REMOVE`. Unknown events are ignored; a malformed known
 event is logged (without its payload) and the connection stays up.
 
 ### User-account READY quirks
@@ -99,6 +147,9 @@ capability flags produce:
 * `merged_members[i]` aligned with `guilds[i]` for the current user's roles
   (role mentions, author colours). `READY_SUPPLEMENTAL` adds other members.
 * Unavailable guilds are skipped until their `GUILD_CREATE`.
+* `relationships` (type 1 friend, 2 blocked, 3 incoming, 4 outgoing,
+  5 implicit; inline `user`) feed the Friends page; DMs with
+  `is_message_request` / `is_spam` go to Message Requests, not the DM list.
 
 Message timestamps come from the snowflake id (`id >> 22` + Discord epoch),
 so no ISO-8601 parsing is needed on the hot path.
@@ -137,6 +188,7 @@ client's retry. Ferrocord never solves a captcha and uses no solver service.
 | Edit / delete | `PATCH` / `DELETE /channels/{c}/messages/{m}` |
 | Reply | `POST .../messages` with `message_reference` and, if "@ OFF", `allowed_mentions {parse:[users,roles,everyone], replied_user:false}` |
 | Reactions | `PUT/DELETE /channels/{c}/messages/{m}/reactions/{emoji}/@me` (`%`-encoded Unicode, or `name:id`) |
+| Who reacted | `GET /channels/{c}/messages/{m}/reactions/{emoji}?limit=&type=0\|1[&after=]` (`type=1`: burst / super reactions; users in id order, `after` = last user id). Only on hover / dialog, see §8. |
 | Jump | `GET .../messages?around={m}` / `?after={m}` |
 | Search | `GET /guilds/{g}/messages/search?content=&offset=` or `/channels/{c}/...` (202 + `retry_after` while indexing is retried, max 4 tries) |
 | Upload | `POST .../messages` `multipart/form-data`: `payload_json` + `files[n]`, streamed from disk with an explicit `Content-Length` |
@@ -147,6 +199,7 @@ client's retry. Ferrocord never solves a captcha and uses no solver service.
 | QR ticket | `POST /users/@me/remote-auth/login` `{ ticket }` with `X-Fingerprint` |
 | Fingerprint | `GET /experiments` (logged out) → `fingerprint` |
 | GIF picker | `GET /gifs/trending-gifs` / `GET /gifs/search?q=` with `media_format=mp4&provider=tenor&locale=en-US` (`{url, src, gif_src, preview, width, height}`); picking sends the Tenor `url` as text (shown back as a `gifv` embed). Opens on Favorites / Trending GIFs tiles like the official picker. Stills: `preview`, else `gif_src`, from whatever HTTPS host the API names (Tenor uses several), with a plain client (no token, no Discord headers or cookies, 10 MB cap), decoded to a <= 256x400 first frame off the UI thread, own 12 MB LRU (`App::gif_thumbs`). Tiles animate (`app/gif_anim.rs`): Tenor's tile-sized `tinygif` (`AAAAM`), else `gif_src`, else Giphy's `200w.gif`, decoded in-process to tile-sized frames; an MP4-only saved GIF goes through the video helper's frames mode. With "Automatically play GIFs" off only the hovered tile plays; "Reduce motion" shows stills. Only tiles near the visible part of the grid are decoded (40 MB budget, frames of tiles a screen away dropped, all freed on close). Every picker download goes through a 100 MB on-disk LRU (`<cache dir>/gifs`, SHA-256 of the URL as file name, at most 4 downloads at a time); the saved GIFs are prefetched into it the first time the picker opens in a session. |
+| Recent emoji | Local only, no request: `meta("pref.recent_emoji")` (JSON list of `Emoji`, newest first, no duplicates, at most 36; kept on logout) in `app/emoji.rs::Recent`. Updated when an emoji is picked, added as a reaction (not when removed) or written in a sent message (`<:name:id>` / `<a:name:id>` and Unicode, normalised to the fully qualified form). The picker opens on "Recently Used" when the list is not empty; the message hover bar offers the first 3 the user can react with in that channel (Nitro-locked and unknown custom emoji skipped). Discord's own emoji frecency (`FrecencyUserSettings`) is not read or written. |
 | Favourite GIFs | `GET /users/@me/settings-proto/2` -> `{settings: base64}` = `FrecencyUserSettings` (discord-protos): field 2 `FavoriteGIFs { map<string, FavoriteGIF> gifs = 1; bool hide_tooltip = 2 }`, `FavoriteGIF { GIFType format = 1 (1 image, 2 video); string src = 2; uint32 width = 3, height = 4, order = 5 }`, key = Tenor page URL, `src` = the MP4 (format 2). The star does GET, changes one map entry, `PATCH /users/@me/settings-proto/2 {settings: base64}` with the whole message (every other field and unknown fields copied byte for byte, `net/frecency.rs`); saves are serialised, optimistic and rolled back on failure. Loaded once, when the picker first opens. |
 | Sticker | `POST .../messages` `{ content: "", nonce, sticker_ids: [id] }` |
 | Media | CDN `avatars/`, `icons/`, `emojis/`, `stickers/{id}.png\|.gif?size=160`, attachment `proxy_url?width=&height=`; GIF picker previews from `media.tenor.com` (HTTPS, never with the token) |
@@ -293,7 +346,38 @@ bar itself and popups rely on their border, as in the official client.
 Fonts: Inter (OFL) and Twemoji (CC-BY 4.0, COLRv0 font) embedded. Icons: Lucide
 (ISC), plus our own `gif.svg` in the same style. No Discord logos, fonts or artwork are used.
 
+### Friends, Message Requests, switcher (`app/friends.rs`, `ui/friends.rs`, `net/rest/friends.rs`)
+
+* Friends page (Home with no DM open): Online / All / Implicit / Pending
+  tabs with a name or username search, and Add Friend. Pending lists
+  incoming requests first; the red badge (Friends entry, Pending tab)
+  counts incoming requests. Removing a friend asks once in the row.
+* Calls: `POST /users/@me/relationships {username, discriminator: null}`
+  (Add Friend; a 400 means no such user, a captcha demand is shown, never
+  solved), `PUT /users/@me/relationships/{id} {}` (accept / add implicit),
+  `DELETE /users/@me/relationships/{id}` (remove, ignore, cancel),
+  `POST /users/@me/channels {recipients}` (Message, when no DM exists).
+* Message Requests: Requests / Spam tabs; Accept is
+  `PUT /channels/{id}/recipients/@me {consent_status: 2}`, Ignore is
+  `DELETE /channels/{id}/recipients/@me`. Messages in a request neither
+  badge nor notify. Not verified against a live account yet.
+* "Find or start a conversation" (button or Ctrl+K): DMs, friends without a
+  DM, text channels and servers; Enter opens the first result.
+
 ## 8. Round 2 behaviour notes
+
+* **Who reacted** (`app/reactions.rs`, `ui/reactions.rs`): hovering a
+  reaction pill shows the official tooltip, "Alice, Bob, and 3 others reacted
+  with :thumbsup:" (word shortcodes, `:name:` for custom emoji), after a
+  300 ms rest. Only then are the first 3 reactors fetched (never for every
+  message on screen); leaving earlier fetches nothing (a generation counter
+  drops the timer). Right-click on a pill, or "Reactions" in the message menu,
+  opens the dialog: one tab per emoji (burst reactions get their own tab,
+  `count_details.burst`), 100 users per page with "Load more" (up to 1000).
+  Lists are cached in a 64-entry LRU; `MESSAGE_REACTION_ADD/REMOVE` patch a
+  complete list in place (known user) or mark it stale (refetched on next
+  hover), `REMOVE_EMOJI` / `REMOVE_ALL` / `MESSAGE_DELETE` drop it. All calls go
+  through the REST layer's buckets (reaction routes share one `:emoji` bucket).
 
 * **Replies**: header from `referenced_message` (null = "Original message was
   deleted"); refreshed from the loaded window when the original is there.
@@ -317,7 +401,7 @@ pure parsing/payloads live in `net/extras.rs`, calls in `net/rest/ext.rs`.
 | Feature | Calls |
 |---|---|
 | Bell | `PATCH /users/@me/guilds/{guild\|@me}/settings` with `channel_overrides.{id}`: `message_notifications` (0 all, 1 mentions, 2 nothing, 3 inherit), `muted` + `mute_config {selected_time_window, end_time}` (`-1`/`null` = until turned back on). READY `user_guild_settings` and `USER_GUILD_SETTINGS_UPDATE` feed `ChatState::channel_notify`; expired timed mutes are dropped. |
-| Pins | `GET /channels/{id}/pins` (array, or the paginated `{items:[{message}]}` shape); `DELETE /channels/{c}/pins/{m}`. The unpin button shows for DMs, the owner, Administrator and Manage Messages (server-wide role bits; channel overwrites are not applied, a 403 is reported). |
+| Pins | `GET /channels/{id}/pins` (array, or the paginated `{items:[{message}]}` shape); `DELETE /channels/{c}/pins/{m}`. The unpin button shows for DMs and where the user has Manage Messages in that channel (owner, Administrator, roles, channel overwrites; see §15). A 403 is still reported. |
 | Inbox | `GET /users/@me/mentions?limit=25&roles=true&everyone=true[&before=][&guild_id=]` (Mentions tab, "This Server" filter, load more). |
 | Help | opens `https://support.discord.com/` in the browser. |
 | Search | `GET /guilds/{id}/messages/search` / `/channels/{id}/messages/search`; `from:name` -> `author_id`, `has:image\|video\|sound\|file\|link\|embed\|sticker` -> `has`, `in:#channel` -> `channel_id` (servers only). Names resolve against known users/channels; an unknown one is an error shown in the panel. |
@@ -762,3 +846,79 @@ the ones above (reaction, friend and activity notifications are not
 produced); keybind editing; translating Ferrocord's own UI (English only;
 the Language page sets the account locale); `USER_SETTINGS_PROTO_UPDATE`
 is not handled (the screen re-reads the proto when it opens instead).
+
+## 15. Permissions and server administration (`app/permissions.rs`, `app/guild_admin.rs`, `app/channel_admin.rs`, `app/role_admin.rs`, `net/rest/guild.rs`, `ui/server_settings.rs`, `ui/channel_admin.rs`, `ui/roles.rs`)
+
+**Permissions.** Computed like the official client: the owner and
+Administrator get everything; otherwise the server-wide bits are the union of
+`@everyone` (the role whose id is the guild id) and the user's roles (READY
+`merged_members`, `GUILD_MEMBER_UPDATE`). In a channel the overwrites
+(`permission_overwrites`: `type` 0 role / 1 member, `allow`/`deny` decimal
+strings) apply in order: `@everyone`, then all of the user's roles together
+(denies, then allows), then the member overwrite. Threads use their parent's.
+Role changes arrive as `GUILD_ROLE_CREATE/UPDATE/DELETE` (and with the whole
+guild in `GUILD_UPDATE`). Channels without View Channel are left out of the
+channel list and the unread badges; a category shows while it holds a visible
+channel or is visible itself. A server whose roles lack `@everyone` (partial
+data) is shown unfiltered.
+
+**Server dropdown.** The chevron in the channel-list header opens the same
+menu as the rail's right-click, with the admin actions first:
+
+| Action | Shown when | Call |
+|---|---|---|
+| Invite People | Create Invite + View Channel in some channel (the open one first) | `POST /channels/{id}/invites {max_age: 604800, max_uses: 0, temporary: false}` -> `code`; the dialog shows `https://discord.gg/{code}` with Copy. |
+| Server Settings | Manage Server or Manage Roles | opens the Server Settings screen (Overview, or Roles without Manage Server). |
+| Leave Server | not the owner | confirmation, then `DELETE /users/@me/guilds/{id} {lurking: false}`. |
+
+**Server Settings** (full window, Esc closes). Overview: name (2-100
+characters) and icon (PNG/JPEG/GIF/WebP `data:` URI, 4 MB, or removed).
+"Save Changes" sends only the changed fields with `PATCH /guilds/{id}
+{name?, icon?}`; the new name shows at once, the icon when `GUILD_UPDATE`
+arrives. Delete Server (owner only) asks for the server name typed exactly,
+then `DELETE /guilds/{id}`. Leaving or deleting closes everything about the
+server and goes Home; the gateway's `GUILD_DELETE` removes it. A 403 reads
+"You do not have permission"; a two-factor requirement points to the official
+client (Ferrocord has no MFA prompt).
+
+**Channels** (`app/channel_admin.rs`, `ui/channel_admin.rs`), for users with
+Manage Channels (server-wide to create; in the channel to edit, move or
+delete):
+
+| Action | Where | Call |
+|---|---|---|
+| Create Channel / Category | server dropdown; "Create Channel" in a category's right-click menu and its "+" | `POST /guilds/{id}/channels {name, type: 0 text / 2 voice / 4 category, parent_id?, permission_overwrites: []}`. Text names are typed like the official client (lower case, spaces as dashes). The new text channel opens. |
+| Edit Channel / Category | channel or category right-click menu | `PATCH /channels/{id}` with the changed fields only: `name`, `topic` (`null` clears), `nsfw`, `parent_id` (`null` = no category). Applied locally on success; `CHANNEL_UPDATE` confirms. |
+| Move Up / Move Down | same menu | siblings (all categories, or the channels under the same category in the same text/voice group, by `(position, id)`) are renumbered 0.. in the new order and the changed ones sent as `PATCH /guilds/{id}/channels [{id, position}]`. Applied at once; a failure restores the old positions. |
+| Delete | same menu, or the Edit dialog | confirmation, then `DELETE /channels/{id}`. Removed locally at once (an open channel switches to the server's first one); deleting a category keeps its channels, uncategorised. |
+
+**Roles** (`app/role_admin.rs`, `ui/roles.rs`; Server Settings -> Roles, for
+users with Manage Roles). Hierarchy like the official client: the owner is
+above every role, everyone else ranks at their highest role's `position`;
+a role can be edited, deleted or given only when it is below the user's top
+role, and only permissions the user has can be switched on (Administrator
+can grant anything). `@everyone` is always listed and edits only its
+permissions.
+
+| Action | Call |
+|---|---|
+| Create Role | `POST /guilds/{id}/roles {name: "new role", permissions: "0"}`; the new role is selected. |
+| Save Changes (name, colour, permission switches) | `PATCH /guilds/{id}/roles/{role}` with the changed fields only: `name`, `color`, `permissions` (decimal string); applied locally, `GUILD_ROLE_UPDATE` confirms. |
+| Delete Role | confirmation, then `DELETE /guilds/{id}/roles/{role}`. |
+| Member's Roles (user right-click -> Roles, in a server) | `PUT` / `DELETE /guilds/{id}/members/{user}/roles/{role}`; applied at once, rolled back on failure. |
+
+**Member moderation** (user right-click in a server). Each item shows only
+with the permission and a higher rank than the member (never on oneself or
+the owner). The optional reason goes in `X-Audit-Log-Reason`
+(percent-encoded, 512 chars).
+
+| Action | Permission | Call |
+|---|---|---|
+| Timeout (60 s, 5 min, 10 min, 1 h, 1 day, 1 week) | Timeout Members | `PATCH /guilds/{id}/members/{user} {communication_disabled_until: ISO-8601}`; "Remove Timeout" sends `null`. |
+| Kick | Kick Members | `DELETE /guilds/{id}/members/{user}`. |
+| Ban (delete none / 1 h / 24 h / 7 days of messages) | Ban Members | `PUT /guilds/{id}/bans/{user} {delete_message_seconds}`. |
+
+Not implemented yet: channel permission overwrites editing, role
+reordering, hoist/mentionable switches, drag-and-drop channel reordering,
+unban list, emoji/sticker uploads, audit log, ownership transfer.
+

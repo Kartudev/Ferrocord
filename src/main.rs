@@ -17,15 +17,10 @@ const USAGE: &str =
 fn main() -> iced::Result {
     ferrocord::cli::handle_info_flags("ferrocord", USAGE);
     let _ = ferrocord::config::PROCESS_START.set(std::time::Instant::now());
-    // Default to the CPU renderer: it keeps idle RSS around 50 MB, while
-    // wgpu costs 100-200 MB (driver dependent) for no visible gain in a
-    // chat UI. `ICED_BACKEND=wgpu` opts back in.
-    if std::env::var_os("ICED_BACKEND").is_none() {
-        // SAFETY: called first thing in `main`, before any other thread
-        // (tokio, iced, logging) exists, so nothing can read the
-        // environment concurrently.
-        unsafe { std::env::set_var("ICED_BACKEND", "tiny-skia") };
-    }
+    // Rendering is tiny-skia (CPU) only: ferroiced builds without wgpu,
+    // which cost 100-200 MB RSS (driver dependent) for no visible gain in a
+    // chat UI. To try wgpu again, enable iced's `wgpu` feature in
+    // `Cargo.toml` and run with `ICED_BACKEND=wgpu`.
     let cfg = match Config::from_args(std::env::args()) {
         Ok(c) => c,
         Err(e) => {
@@ -33,11 +28,8 @@ fn main() -> iced::Result {
             std::process::exit(2);
         }
     };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(
-            "info,wgpu_core=warn,wgpu_hal=warn,naga=warn,iced_wgpu=warn,cosmic_text=warn",
-        )
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,cosmic_text=warn"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(LogSink::new(cfg.log_path()))
@@ -86,7 +78,8 @@ fn main() -> iced::Result {
     .scale_factor(|app: &App, _window: iced::window::Id| app.zoom())
     .default_font(ferrocord::ui::theme::INTER)
     .antialiasing(true);
-    // Colour emoji: the bundled Twemoji (see `ui::emoji_font`).
+    // UI font (Inter) and colour emoji (Twemoji), before any window exists
+    // (see `ui::emoji_font`).
     ferrocord::ui::emoji_font::install();
     app.run()
 }

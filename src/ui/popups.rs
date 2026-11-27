@@ -12,6 +12,7 @@ use super::theme::{self, INTER, INTER_MEDIUM, INTER_SEMIBOLD};
 use super::{El, avatar, ui};
 use crate::app::actions::OpenPicker;
 use crate::app::emoji::{self, CATEGORIES, PickerTarget, Section};
+use crate::app::nitro::Usable;
 use crate::app::{App, Message, Ui, emoji_url, input};
 use crate::net::model::*;
 
@@ -546,6 +547,14 @@ fn menu_items(app: &App, m: MessageId) -> Vec<Item> {
         }),
         danger: false,
     }];
+    if !msg.reactions.is_empty() {
+        v.push(Item {
+            icon: Icon::Smile,
+            label: "Reactions",
+            action: Ui::OpenReactors(m, None),
+            danger: false,
+        });
+    }
     if mine && matches!(msg.kind, 0 | 19) {
         v.push(Item {
             icon: Icon::Pencil,
@@ -699,6 +708,12 @@ fn emoji_picker<'a>(app: &'a App, open: &'a OpenPicker) -> El<'a> {
     };
     let servers = emoji::server_sections(&app.chat.guilds, &access);
     let mut side = column![].spacing(2).align_x(Alignment::Center);
+    if !app.recent_emoji.is_empty() {
+        side = side.push(tab(
+            icon(Icon::Clock, 18.0, p.text_secondary),
+            Section::Recent,
+        ));
+    }
     for g in &servers {
         let face: El<'a> = match app.guild_icon(g) {
             Some(h) => image(h.clone())
@@ -752,9 +767,8 @@ fn emoji_picker<'a>(app: &'a App, open: &'a OpenPicker) -> El<'a> {
     .style(theme::bg(p.bg_app));
 
     // Grid.
-    let mut cells: Vec<El<'a>> = Vec::new();
-    for (_, ce, usable) in emoji::shown_custom(pk, &app.chat.guilds, &access) {
-        let face: El<'a> = match app.image(&emoji_url(&app.cfg.cdn_url, ce.id)) {
+    let custom_face = |ce: &CustomEmoji, usable: Usable| -> El<'a> {
+        match app.image(&emoji_url(&app.cfg.cdn_url, ce.id)) {
             // Locked emoji are greyed out, as in the official picker.
             Some(h) => image(h.clone())
                 .width(28)
@@ -762,8 +776,25 @@ fn emoji_picker<'a>(app: &'a App, open: &'a OpenPicker) -> El<'a> {
                 .opacity(if usable.locked() { 0.35_f32 } else { 1.0_f32 })
                 .into(),
             None => text(":").size(14).color(p.text_muted).into(),
-        };
-        cells.push(emoji_button(p, face, Emoji::custom(ce)));
+        }
+    };
+    let mut cells: Vec<El<'a>> = Vec::new();
+    if pk.query.is_empty() && pk.section == Section::Recent {
+        for item in emoji::recent_shown(&app.recent_emoji, &app.chat.guilds, &access) {
+            cells.push(match item {
+                emoji::RecentItem::Unicode(s) => emoji_button(
+                    p,
+                    emoji_text(s, 24.0, p.text_normal, INTER, false),
+                    Emoji::unicode(s),
+                ),
+                emoji::RecentItem::Custom(_, ce, usable) => {
+                    emoji_button(p, custom_face(ce, usable), Emoji::custom(ce))
+                }
+            });
+        }
+    }
+    for (_, ce, usable) in emoji::shown_custom(pk, &app.chat.guilds, &access) {
+        cells.push(emoji_button(p, custom_face(ce, usable), Emoji::custom(ce)));
     }
     let unicode: Vec<&'static emojis::Emoji> = if !pk.query.is_empty() {
         emoji::search(&pk.query)
@@ -806,6 +837,7 @@ fn emoji_picker<'a>(app: &'a App, open: &'a OpenPicker) -> El<'a> {
         "Search results".to_owned()
     } else {
         match pk.section {
+            Section::Recent => "Recently Used".to_owned(),
             Section::Server(id) => app
                 .chat
                 .guild(id)

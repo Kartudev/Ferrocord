@@ -59,6 +59,30 @@ pub enum ScreenshotScreen {
     FolderMenu,
     FolderSettings,
     SearchFilters,
+    /// Server dropdown of a server the mock user owns.
+    ServerMenu,
+    /// Server Settings (Overview) with an unsaved change.
+    ServerSettings,
+    /// Invite People dialog.
+    ServerInvite,
+    /// Leave Server confirmation.
+    LeaveServer,
+    /// Delete Server confirmation.
+    DeleteServer,
+    /// Right-click menu of a channel the mock user can manage.
+    ChannelMenu,
+    /// Create Channel dialog.
+    CreateChannel,
+    /// Edit Channel dialog.
+    EditChannel,
+    /// Server Settings → Roles, editing a role.
+    ServerRoles,
+    /// Right-click menu of a server member, with the moderation items.
+    MemberMenu,
+    /// A member's roles dialog.
+    MemberRoles,
+    /// Ban dialog for a member.
+    BanMember,
     /// Joined voice channel with users, speaking ring and the
     /// "Voice Connected" panel.
     Voice,
@@ -90,10 +114,26 @@ pub enum ScreenshotScreen {
     PluginDecorations,
     /// Emoji picker on another server's emoji, with the Nitro lock footer.
     EmojiLocked,
+    /// Reaction picker on the "Recently Used" section.
+    EmojiRecent,
     /// Sticker picker with a Nitro-locked sticker picked.
     StickersLocked,
     /// The "new version available" banner.
     UpdateBanner,
+    /// The Reactions dialog (who reacted, a tab per emoji).
+    Reactions,
+    /// Member sidebar scrolled deep into a large list (skeleton rows).
+    MembersLarge,
+    /// Friends page: Online tab.
+    Friends,
+    /// Friends page: Pending tab (incoming + outgoing requests).
+    FriendsPending,
+    /// Friends page: Add Friend tab after a request was sent.
+    FriendsAdd,
+    /// Message Requests page.
+    MessageRequests,
+    /// "Find or start a conversation" with a query.
+    Switcher,
 }
 
 impl ScreenshotScreen {
@@ -117,6 +157,18 @@ impl ScreenshotScreen {
                 | Self::FolderMenu
                 | Self::FolderSettings
                 | Self::SearchFilters
+                | Self::ServerMenu
+                | Self::ServerSettings
+                | Self::ServerInvite
+                | Self::LeaveServer
+                | Self::DeleteServer
+                | Self::ChannelMenu
+                | Self::CreateChannel
+                | Self::EditChannel
+                | Self::ServerRoles
+                | Self::MemberMenu
+                | Self::MemberRoles
+                | Self::BanMember
         )
     }
 
@@ -151,6 +203,18 @@ impl ScreenshotScreen {
             "folders" => Some(Self::Folders),
             "folder-menu" => Some(Self::FolderMenu),
             "folder-settings" => Some(Self::FolderSettings),
+            "server-menu" => Some(Self::ServerMenu),
+            "server-settings" => Some(Self::ServerSettings),
+            "server-invite" => Some(Self::ServerInvite),
+            "leave-server" => Some(Self::LeaveServer),
+            "delete-server" => Some(Self::DeleteServer),
+            "channel-menu" => Some(Self::ChannelMenu),
+            "create-channel" => Some(Self::CreateChannel),
+            "edit-channel" => Some(Self::EditChannel),
+            "server-roles" => Some(Self::ServerRoles),
+            "member-menu" => Some(Self::MemberMenu),
+            "member-roles" => Some(Self::MemberRoles),
+            "ban-member" => Some(Self::BanMember),
             "search-filters" => Some(Self::SearchFilters),
             "voice" => Some(Self::Voice),
             "call" => Some(Self::Call),
@@ -167,8 +231,16 @@ impl ScreenshotScreen {
             "plugin-prompt" => Some(Self::PluginPrompt),
             "plugin-decorations" => Some(Self::PluginDecorations),
             "emoji-locked" => Some(Self::EmojiLocked),
+            "emoji-recent" => Some(Self::EmojiRecent),
             "stickers-locked" => Some(Self::StickersLocked),
             "update-banner" => Some(Self::UpdateBanner),
+            "reactions" => Some(Self::Reactions),
+            "members-large" => Some(Self::MembersLarge),
+            "friends" => Some(Self::Friends),
+            "friends-pending" => Some(Self::FriendsPending),
+            "friends-add" => Some(Self::FriendsAdd),
+            "message-requests" => Some(Self::MessageRequests),
+            "switcher" => Some(Self::Switcher),
             _ => None,
         }
     }

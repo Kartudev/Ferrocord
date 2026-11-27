@@ -33,14 +33,19 @@ pub const DM_ALICE: ChannelId = Snowflake(600);
 pub const DM_BOB: ChannelId = Snowflake(601);
 pub const DM_GROUP: ChannelId = Snowflake(602);
 pub const DM_EVE: ChannelId = Snowflake(603);
+/// Message requests: one from Marco, one Discord filed as spam.
+pub const DM_REQUEST: ChannelId = Snowflake(604);
+pub const DM_SPAM: ChannelId = Snowflake(605);
 
 pub const ROLE_MOD: RoleId = Snowflake(900);
 pub const ROLE_MEMBER: RoleId = Snowflake(901);
 pub const ROLE_CORE: RoleId = Snowflake(902);
 pub const ROLE_BOT: RoleId = Snowflake(903);
+pub const ROLE_GAMES_MODS: RoleId = Snowflake(4901);
+pub const ROLE_GAMES_PLAYERS: RoleId = Snowflake(4902);
 pub const MOD_COLOR: u32 = 0x2ecc71;
 
-const NAMES: [(&str, &str); 7] = [
+const NAMES: [(&str, &str); 11] = [
     ("", ""),
     ("ferris_fan", "Ferris Fan"),
     ("alice.dev", "Alice"),
@@ -48,6 +53,10 @@ const NAMES: [(&str, &str); 7] = [
     ("carol_codes", "Carol"),
     ("clippy_bot", "Clippy Bot"),
     ("eve", "Eve"),
+    ("ruby.rs", "Ruby"),
+    ("zed_dev", "Zed"),
+    ("marco.polo", "Marco"),
+    ("free_nitro_420", "Free Nitro"),
 ];
 
 /// Users already sitting in the mock voice channels.
@@ -115,6 +124,9 @@ fn ch(
         last_message_id: None,
         recipients: vec![],
         nsfw: false,
+        overwrites: vec![],
+        message_request: false,
+        spam: false,
     }
 }
 
@@ -207,6 +219,9 @@ pub fn mock_stickers() -> Vec<Sticker> {
     ]
 }
 
+/// Discord's default `@everyone` permissions.
+pub const EVERYONE_PERMISSIONS: u64 = 1_071_698_660_929;
+
 fn role(id: RoleId, name: &str, color: u32, position: i32) -> Role {
     Role {
         id,
@@ -297,6 +312,14 @@ pub fn ready() -> ReadyData {
     dm(DM_BOB, Dm, "", vec![3]);
     dm(DM_GROUP, GroupDm, "Weekend plans", vec![4, 5, 6]);
     dm(DM_EVE, Dm, "", vec![6]);
+    dm(DM_REQUEST, Dm, "", vec![9]);
+    dm(DM_SPAM, Dm, "", vec![10]);
+    for c in channels.iter_mut() {
+        if c.id == DM_REQUEST || c.id == DM_SPAM {
+            c.message_request = true;
+            c.spam = c.id == DM_SPAM;
+        }
+    }
 
     // Last message ids: everything has recent activity.
     let mut read_states = Vec::new();
@@ -352,11 +375,31 @@ pub fn ready() -> ReadyData {
             )),
             iced_emoji(guild(GUILD_ICED, "Iced GUI", vec![])),
             guild(GUILD_LINUX, "Linux Desktop", vec![]),
-            guild(GUILD_GAMES, "Game Night", vec![]),
+            // Owned by the mock user: the server dropdown offers the admin
+            // actions (Server Settings, Invite People).
+            Guild {
+                owner_id: Some(ME),
+                ..guild(
+                    GUILD_GAMES,
+                    "Game Night",
+                    vec![
+                        Role {
+                            permissions: EVERYONE_PERMISSIONS,
+                            ..role(GUILD_GAMES, "@everyone", 0, 0)
+                        },
+                        Role {
+                            permissions: 1 << 1 | 1 << 40 | 1 << 13,
+                            ..role(ROLE_GAMES_MODS, "Moderators", 0xe91e63, 2)
+                        },
+                        role(ROLE_GAMES_PLAYERS, "Players", 0x3498db, 1),
+                    ],
+                )
+            },
             guild(GUILD_CAFE, "Open Source Café", vec![]),
         ],
         channels,
-        users: (2..=6).map(user).collect(),
+        users: (2..=10).map(user).collect(),
+        relationships: relationships(),
         read_states,
         guild_order: vec![GUILD_RUST, GUILD_ICED, GUILD_LINUX, GUILD_GAMES, GUILD_CAFE],
         my_roles: vec![(GUILD_RUST, vec![ROLE_MEMBER])],
@@ -377,6 +420,84 @@ pub fn ready() -> ReadyData {
         guild_folders: vec![],
         channel_notify: vec![],
     }
+}
+
+/// Who reacted (mock `GET .../reactions/{emoji}`): the mock users in
+/// id order, then made-up ones, `limit` after `after`.
+pub fn reactors(
+    key: &crate::app::reactions::ReactionKey,
+    limit: u32,
+    after: Option<UserId>,
+) -> Vec<User> {
+    let _ = key;
+    let start = after.map_or(1, |a| a.0 + 1);
+    (start..start + u64::from(limit))
+        .map(|n| match n {
+            1..=6 => user(n),
+            _ => User {
+                id: Snowflake(n),
+                username: format!("crab{n}"),
+                global_name: Some(format!("Crab {n}")),
+                ..Default::default()
+            },
+        })
+        .collect()
+}
+
+/// A large member list (3000 online members) of the mock Rust server:
+/// rows 1400-1499 are loaded, the rest are skeleton rows.
+pub fn large_member_list() -> MemberListUpdate {
+    let items = (1400..1500u64)
+        .map(|n| {
+            let id = 10_000 + n;
+            MemberItem::Member(Box::new(MemberEntry {
+                user: User {
+                    id: Snowflake(id),
+                    username: format!("crab{n}"),
+                    global_name: Some(format!("Crab {n}")),
+                    ..Default::default()
+                },
+                nick: None,
+                roles: vec![],
+                presence: match n % 3 {
+                    0 => Presence::Online,
+                    1 => Presence::Idle,
+                    _ => Presence::Dnd,
+                },
+                activities: vec![],
+            }))
+        })
+        .collect();
+    MemberListUpdate {
+        guild_id: GUILD_RUST,
+        list_id: "everyone".into(),
+        member_count: 3000,
+        online_count: 3000,
+        groups: vec![("online".into(), 3000)],
+        ops: vec![MemberOp::Sync { start: 1400, items }],
+    }
+}
+
+/// Friends (Alice, Bob, Carol, Eve), an incoming request (Ruby), an
+/// outgoing one (Zed) and an implicit relationship (Marco).
+pub fn relationships() -> Vec<Relationship> {
+    use RelationshipKind::*;
+    [
+        (2, Friend),
+        (3, Friend),
+        (4, Friend),
+        (6, Friend),
+        (7, Incoming),
+        (8, Outgoing),
+        (9, Implicit),
+    ]
+    .into_iter()
+    .map(|(n, kind)| Relationship {
+        user_id: Snowflake(n),
+        kind,
+        nickname: None,
+    })
+    .collect()
 }
 
 /// Member list of the mock Rust server, as the server would send it.
@@ -569,6 +690,7 @@ pub fn history(channel: ChannelId) -> Vec<Message> {
                         emoji: Emoji::unicode(e),
                         count,
                         me,
+                        burst_count: 0,
                     })
                     .collect();
                 m
@@ -588,6 +710,15 @@ pub fn history(channel: ChannelId) -> Vec<Message> {
         ],
         DM_BOB => long_history(DM_BOB),
         DM_EVE => vec![gm(DM_EVE, 4400, 0, 6, &[], "see you at the meetup")],
+        DM_REQUEST => vec![gm(
+            DM_REQUEST,
+            30,
+            0,
+            9,
+            &[],
+            "Hey! We met at the Rust meetup, mind if I ask about your iced fork?",
+        )],
+        DM_SPAM => vec![gm(DM_SPAM, 12, 0, 10, &[], "FREE NITRO click here!!!")],
         _ => general(channel),
     }
 }
@@ -714,7 +845,12 @@ fn general(channel: ChannelId) -> Vec<Message> {
     ];
     v[7].mentions = vec![ME];
     v[2].edited = true;
-    let react = |emoji: Emoji, count: u32, me: bool| Reaction { emoji, count, me };
+    let react = |emoji: Emoji, count: u32, me: bool| Reaction {
+        emoji,
+        count,
+        me,
+        burst_count: 0,
+    };
     v[3].reactions = vec![
         react(Emoji::unicode("👍"), 3, true),
         react(Emoji::unicode("🎉"), 2, false),
@@ -1217,6 +1353,31 @@ pub fn gif_anim(n: usize) -> Option<crate::app::anim::Anim> {
         })
         .collect();
     crate::app::anim::from_frames_limited(frames, &crate::app::anim::Class::Picker.limits()).ok()
+}
+
+/// Recently used emoji of the mock account, newest first: Unicode ones,
+/// the Rust server's custom emoji and a Nitro-locked one of the Iced server.
+pub fn recent_emoji() -> crate::app::emoji::Recent {
+    let mut r = crate::app::emoji::Recent::default();
+    let custom = |id: u64, name: &str| Emoji {
+        id: Some(Snowflake(id)),
+        name: name.into(),
+        animated: false,
+    };
+    for e in [
+        Emoji::unicode("🎉"),
+        custom(1003, "iced_cube"),
+        Emoji::unicode("🔥"),
+        Emoji::unicode("😂"),
+        Emoji::unicode("❤️"),
+        custom(1002, "party"),
+        Emoji::unicode("🦀"),
+        custom(1001, "ferris"),
+        Emoji::unicode("👍"),
+    ] {
+        r.record(e);
+    }
+    r
 }
 
 /// Saved GIFs of the mock account: mock GIFs 3 and 6, newest first.

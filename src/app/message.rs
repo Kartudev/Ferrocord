@@ -110,6 +110,17 @@ pub enum Ui {
     CopyLink(MessageId),
     // -- reactions and emoji
     ToggleReaction(MessageId, Emoji),
+    /// The pointer entered a reaction pill (its tooltip fetches the
+    /// reactors after a short delay).
+    ReactionHover(super::reactions::ReactionKey),
+    ReactionUnhover(super::reactions::ReactionKey),
+    /// The "Reactions" dialog of a message, on an emoji's tab (or the first).
+    OpenReactors(MessageId, Option<Emoji>),
+    /// A tab of the reactions dialog: emoji + burst.
+    ReactorsTab(Emoji, bool),
+    /// Next page of the open tab.
+    ReactorsMore,
+    CloseReactors,
     OpenEmojiPicker(PickerTarget),
     EmojiQuery(String),
     EmojiSection(Section),
@@ -195,6 +206,12 @@ pub enum Ui {
     Unpin(ChannelId, MessageId),
     InboxMore,
     InboxGuildOnly(bool),
+    /// Server administration (dropdown, Server Settings).
+    Admin(super::guild_admin::AdminUi),
+    /// Channel administration (create, edit, delete, move).
+    Channel(super::channel_admin::ChannelUi),
+    /// Roles page and member moderation.
+    Roles(super::role_admin::RoleUi),
     // -- add a server
     OpenAddServer,
     CloseAddServer,
@@ -249,6 +266,8 @@ pub enum Ui {
     Voice(super::voice::VoiceUi),
     /// User Settings screen.
     Settings(super::settings::SettingsUi),
+    /// Friends page, Message Requests, conversation switcher.
+    Friends(super::friends::FriendsUi),
 }
 
 /// Completion of a `Task`.
@@ -327,6 +346,8 @@ pub enum Done {
     ClearHighlight(MessageId),
     /// User Settings tasks.
     Settings(Box<super::settings::SettingsDone>),
+    /// Friends / Message Requests calls.
+    Friends(Box<super::friends::FriendsDone>),
     Upload {
         id: u64,
         event: UploadEvent,
@@ -355,6 +376,13 @@ pub enum Done {
     },
     /// The GIF search debounce timer of this generation fired.
     GifSearchDue(u64),
+    /// The pointer rested on a reaction pill (generation of that hover).
+    ReactionHoverDue(u64),
+    /// `GET .../reactions/{emoji}` finished.
+    Reactors {
+        fetch: Box<super::reactions::Fetch>,
+        result: Result<Vec<User>, String>,
+    },
     Gifs {
         generation: u64,
         result: Result<Vec<crate::net::model::Gif>, String>,
@@ -412,6 +440,9 @@ pub enum Done {
         result: Result<(GuildId, String), String>,
     },
     Created(Result<(GuildId, String), String>),
+    Admin(super::guild_admin::AdminDone),
+    Channel(super::channel_admin::ChannelDone),
+    Roles(super::role_admin::RoleDone),
     /// Server icon chosen: `(path, data URI)` or the reason it was refused;
     /// `None` when the dialog was cancelled.
     IconPicked(Option<Result<(PathBuf, String), String>>),

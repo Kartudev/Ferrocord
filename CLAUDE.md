@@ -9,7 +9,7 @@ Video (camera / Go Live) is not implemented yet: see `docs/voice.md` §6.
 
 ## Commands
 - `cargo run -- --mock` — run with mock data (no network, in-memory stores).
-- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner> out.png` — render a screen to PNG
+- `cargo run -- --mock --screenshot <login|login-captcha|login-web|login-web-failed|guild|dms|embeds|voice|call|incoming-call|gifs|gif-trending|gif-favorites|emoji-locked|emoji-recent|stickers-locked|settings|settings-<profiles|privacy|status|appearance|accessibility|voice|chat|notifications|keybinds|language|advanced|updates>|plugins|plugin-prompt|plugin-decorations|update-banner|reactions|members-large|server-menu|server-settings|server-invite|leave-server|delete-server|channel-menu|create-channel|edit-channel|server-roles|member-menu|member-roles|ban-member|friends|friends-pending|friends-add|message-requests|switcher> out.png` — render a screen to PNG
   (headless: `ICED_BACKEND=tiny-skia xvfb-run -a -s "-screen 0 1280x800x24" ...`).
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - `cargo build --release`. `ferrocord --version` / `-V` (also `ferrocord-player`, `ferrocord-login`).
@@ -52,21 +52,24 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
 - Third-party clients violate Discord's ToS; keep the README warning intact.
 - Keep iced default features on (they carry the x11/wayland backends).
 - iced comes from the `ferroiced` fork (`[patch.crates-io]` in `Cargo.toml`):
-  iced 0.14.1 plus a tiny-skia fast path for opaque images. Patch every iced
-  crate to the same source; after changing it run `cargo update -p iced`.
+  iced 0.14.1 with tiny-skia redraw optimizations, and `wgpu` and
+  `linux-theme-detection` off by default (tiny-skia is the only renderer).
+  Patch every iced crate to the same source; after changing it run
+  `cargo update -p iced`, then check `Cargo.lock` only changed iced packages.
 - Integration tests use local mock WebSocket/HTTP servers; never real accounts.
 - Endpoints can be overridden with `FERROCORD_GATEWAY_URL`, `FERROCORD_API_URL`,
   `FERROCORD_REMOTE_AUTH_URL`, `FERROCORD_CDN_URL`.
 - Mouse position / Shift live in `app/input.rs` atomics (no per-event messages).
 - File dialog: `rfd` (xdg-portal). Clipboard files/images: `arboard`.
 - Keyring tests must use `MemoryStore` (no Secret Service in CI).
-- `main` defaults `ICED_BACKEND=tiny-skia` (wgpu costs 100-200 MB RSS).
+- No wgpu: it costs 100-200 MB RSS. Re-enable with iced's `wgpu` feature plus
+  `ICED_BACKEND=wgpu` if ever needed.
 - Login captcha: Discord's page opens in the `ferrocord-login` helper (`wry`; WebView2 / WebKitGTK 4.1,
   build needs `libwebkit2gtk-4.1-dev`). Only the helper may link the webview (CI ldd check). Never render
   hCaptcha on our own page or fake an origin; never solve captchas. REST identity headers live in `net/identity.rs`.
 - Voice: static libopus (needs `cmake`), `cpal` (`libasound2-dev`); the voice subscription exists
   only in a call. DAVE is mandatory (close 4017); keep `davey` calls under `catch_unwind`.
-- Unicode emoji are Twemoji (`assets/fonts/Twemoji.ttf`, COLRv0, CC-BY 4.0, family "Ferrocord Twemoji"): use the emoji span (`ui::emoji_font::emoji_text`/`emoji_runs`/`emoji_font()`). `emoji_font::install()` (in `main`) loads it zero-copy and puts it first in cosmic-text's common fallback, so the composer (`text_editor`, no spans) gets Twemoji too. swash draws COLRv0 and CBDT/sbix in colour, never COLRv1: do not swap in a COLRv1 or SVG-only font. No system emoji font is used.
+- Unicode emoji are Twemoji (`assets/fonts/Twemoji.ttf`, COLRv0, CC-BY 4.0, family "Ferrocord Twemoji"): use the emoji span (`ui::emoji_font::emoji_text`/`emoji_runs`/`emoji_font()`). `emoji_font::install()` (in `main`, before `run`) loads Inter (`theme::FONT_FILES`, every weight/style the views use) and Twemoji zero-copy into iced's font system and sets the common fallback to Inter, then Twemoji, then the platform list, so the composer (`text_editor`, no spans) gets Twemoji too. Never load fonts with `iced::font::load` (the daemon drops it while no window exists: `--minimized` started without Inter) and never put Twemoji first in the fallback: Basic shaping (ASCII text) takes the first fallback unchecked for a missing face, and Twemoji has no letters (boxes; its digits draw blank). `emoji_font` tests shape every weight/style with no system fonts. swash draws COLRv0 and CBDT/sbix in colour, never COLRv1: do not swap in a COLRv1 or SVG-only font. No system emoji font is used.
 - Custom emoji / stickers without Nitro: `app/nitro.rs` decides (`premium_type`, the item's guild vs the open one, `available`, emoji `roles`, sticker format). Locked items stay visible with a lock; picking one shows a footer with an explicit "Send as image" (scaled PNG / animated GIF upload). Never send a locked item silently or as `<:name:id>`.
 - User Settings (`app/settings.rs`, `ui/settings.rs`, `docs/protocol.md` §14): account settings go through
   `settings-proto/1` (`net/user_settings.rs`): PATCH only the touched top-level fields, each complete
@@ -77,6 +80,12 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
   their own row is hovered (`App::list_phase`, `anim::Hover` + `Zone`), like the official client;
   only the profile popout plays them unhovered. Never make list cosmetics play unhovered: each
   costs 60 window redraws/s.
+- Permissions (`app/permissions.rs`): owner/Administrator -> all; else `@everyone` + roles, then channel
+  overwrites (`@everyone`, roles, member). Gate UI actions with `ChatState::channel_permissions` /
+  `can_in_guild`, never with "is owner" alone; channels without View Channel are hidden. Server admin
+  lives in `app/guild_admin.rs` (`Ui::Admin`), channels in `app/channel_admin.rs` (`Ui::Channel`), roles + member moderation in `app/role_admin.rs`
+  (`Ui::Roles`; hierarchy via `permissions::top_position`/`outranks`), REST in
+  `net/rest/guild.rs` (docs/protocol.md §15).
 - Composer is a `text_editor` (`app/composer.rs`): Enter sends, Shift+Enter newline; cursor columns are bytes. Container `shadow` is safe with ferroiced (tiny-skia clips it to the damage region), but
   the house style keeps the gradient header and sets no shadow (`ui/theme.rs` guard test).
 - Video helper (`ferrocord-player`): MP4/MOV is read by our own `mp4.rs` (progressive + fragmented `moof`, QuickTime);
@@ -111,3 +120,10 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and tests on ubuntu-latest.
   `install.sh` layout and a writable Windows zip folder; cargo installs get the `cargo install` command, everything
   else the release page. Reuse `install.sh`'s paths and file list (`update::install::SHIPPED`); stage next to the
   target and rename, roll back on failure. Restart runs the installed path, never `current_exe()` ("(deleted)").
+- Member sidebar (`app/members.rs`, `ui/members.rs`, docs/protocol.md §2 "Member list"): op 14 asks for `[0,99]` plus the
+  chunks at the scroll position (max 3 ranges, like the official client); rows live in a sparse map only inside the
+  subscribed ranges, the length comes from `groups`. Rows have FIXED heights (`ui::members::ROWS`): the visible window
+  is computed from the scroll offset, so keep every row exactly that tall. A list belongs to a list id: after a channel
+  switch only a SYNC adopts another list. Group DMs: `recipients` + `CHANNEL_RECIPIENT_ADD/REMOVE`.
+- Who reacted (`app/reactions.rs`, `ui/reactions.rs`): reactors are fetched ONLY after a 300 ms hover on a pill or
+  when the Reactions dialog opens a tab, never per message on screen; bounded LRU patched/invalidated by reaction events.

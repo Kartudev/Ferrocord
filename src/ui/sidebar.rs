@@ -9,6 +9,9 @@ use super::icons::{Icon, icon};
 use super::theme::{self, INTER, INTER_MEDIUM, INTER_SEMIBOLD};
 use super::{El, avatar_with_presence, avatar_with_status, initials_circle, mention_badge, ui};
 use crate::app::anim::{Hover, Zone};
+use crate::app::context::{CtxMenu, CtxTarget};
+use crate::app::friends::{FriendsUi, HomePage};
+use crate::app::guild_admin::AdminUi;
 use crate::app::{App, Message, Ui, View};
 use crate::net::model::*;
 
@@ -51,13 +54,32 @@ fn guild_header(app: &App, g: GuildId) -> El<'_> {
         .guild(g)
         .map(|g| g.name.clone())
         .unwrap_or_default();
-    row![
-        container(emoji_text(name, 16.0, p.header_text, INTER_SEMIBOLD, false)).width(Length::Fill),
-        icon(Icon::ChevronDown, 18.0, p.text_normal),
-    ]
+    // The chevron turns into an X while the dropdown is open.
+    let open = matches!(
+        app.ctx_menu,
+        Some(CtxMenu {
+            target: CtxTarget::Guild(x),
+            ..
+        }) if x == g
+    );
+    button(
+        row![
+            container(emoji_text(name, 16.0, p.header_text, INTER_SEMIBOLD, false))
+                .width(Length::Fill),
+            icon(
+                if open { Icon::X } else { Icon::ChevronDown },
+                18.0,
+                p.text_normal
+            ),
+        ]
+        .height(Length::Fill)
+        .align_y(Alignment::Center),
+    )
     .padding(Padding::from([0, 16]))
+    .width(Length::Fill)
     .height(Length::Fill)
-    .align_y(Alignment::Center)
+    .on_press(ui(Ui::Admin(AdminUi::ToggleMenu(g))))
+    .style(theme::list_row(p, open))
     .into()
 }
 
@@ -191,6 +213,32 @@ fn guild_channels(app: &App, g: GuildId, open: Option<ChannelId>) -> El<'_> {
             .width(Length::Fill)
             .on_press(ui(Ui::ToggleCategory(cat.id)))
             .style(theme::link_button(p));
+            let header = iced::widget::mouse_area(header).on_right_press(ui(Ui::ContextOpen(
+                crate::app::context::CtxTarget::Channel(cat.id),
+            )));
+            // "+" (Create Channel in this category) for channel managers.
+            let header: El<'_> = if app.can_manage_channels(g) {
+                row![
+                    header,
+                    container(
+                        button(icon(Icon::Plus, 14.0, p.text_muted))
+                            .padding(2)
+                            .on_press(ui(Ui::Channel(
+                                crate::app::channel_admin::ChannelUi::OpenCreate {
+                                    guild: g,
+                                    parent: Some(cat.id),
+                                    category: false,
+                                }
+                            )))
+                            .style(theme::icon_button(p))
+                    )
+                    .padding(Padding::ZERO.top(14).right(8)),
+                ]
+                .align_y(Alignment::Center)
+                .into()
+            } else {
+                header.into()
+            };
             col = col.push(header);
             for c in kids {
                 let selected = open == Some(c.id);
@@ -218,17 +266,28 @@ fn guild_channels(app: &App, g: GuildId, open: Option<ChannelId>) -> El<'_> {
 fn dm_header(app: &App) -> El<'_> {
     let p = app.theme.palette;
     container(
-        container(
-            text("Find or start a conversation")
-                .size(14)
-                .font(INTER_MEDIUM)
-                .color(p.text_muted),
+        button(
+            container(
+                text("Find or start a conversation")
+                    .size(14)
+                    .font(INTER_MEDIUM)
+                    .color(p.text_muted)
+                    .wrapping(text::Wrapping::None),
+            )
+            .center(Length::Fill),
         )
         .width(Length::Fill)
         .height(28)
         .padding(Padding::from([0, 6]))
-        .align_y(Alignment::Center)
-        .style(theme::rounded_bg(p.bg_app, 4.0)),
+        .on_press(Message::Ui(Ui::Friends(FriendsUi::OpenSwitcher)))
+        .style(move |_, _| button::Style {
+            background: Some(iced::Background::Color(p.bg_app)),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
     )
     .padding(Padding::from([0, 10]))
     .height(Length::Fill)
@@ -236,24 +295,70 @@ fn dm_header(app: &App) -> El<'_> {
     .into()
 }
 
+/// "Friends" / "Message Requests" entry at the top of the DM list.
+fn home_entry<'a>(
+    app: &'a App,
+    i: Icon,
+    label: &'static str,
+    selected: bool,
+    badge: usize,
+    msg: FriendsUi,
+) -> El<'a> {
+    let p = app.theme.palette;
+    let color = if selected {
+        p.header_text
+    } else {
+        p.text_secondary
+    };
+    let mut r = row![
+        icon(i, 22.0, color),
+        text(label)
+            .size(16)
+            .font(INTER_MEDIUM)
+            .color(color)
+            .wrapping(text::Wrapping::None)
+            .width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    if badge > 0 {
+        r = r.push(mention_badge(&p, badge as u32, p.bg_sidebar));
+    }
+    container(
+        button(r)
+            .padding(Padding::from([10, 12]))
+            .width(Length::Fill)
+            .on_press(Message::Ui(Ui::Friends(msg)))
+            .style(theme::list_row(p, selected)),
+    )
+    .padding(Padding::from([0, 8]))
+    .into()
+}
+
 fn dm_list(app: &App, open: Option<ChannelId>) -> El<'_> {
     let p = app.theme.palette;
-    let friends = button(
-        row![
-            icon(Icon::Users, 22.0, p.text_secondary),
-            text("Friends")
-                .size(16)
-                .font(INTER_MEDIUM)
-                .color(p.text_secondary),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding::from([10, 12]))
-    .width(Length::Fill)
-    .style(theme::list_row(p, open.is_none()));
+    let page = if open.is_none() {
+        app.home_page()
+    } else {
+        None
+    };
     let mut col = column![
-        container(friends).padding(Padding::from([0, 8])),
+        home_entry(
+            app,
+            Icon::Users,
+            "Friends",
+            page == Some(HomePage::Friends),
+            crate::app::friends::incoming_count(&app.chat),
+            FriendsUi::OpenFriends,
+        ),
+        home_entry(
+            app,
+            Icon::Mail,
+            "Message Requests",
+            page == Some(HomePage::Requests),
+            app.chat.message_requests(false).len(),
+            FriendsUi::OpenRequests,
+        ),
         row![
             text("DIRECT MESSAGES")
                 .size(12)

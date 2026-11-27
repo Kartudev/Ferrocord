@@ -213,7 +213,7 @@ impl App {
                     .and_then(|c| self.chat.channels.get(&c))
                     .and_then(|c| c.guild_id)
                     .and_then(|g| self.chat.guild(g));
-                let picker = EmojiPicker::open(target, guild);
+                let picker = EmojiPicker::open(target, guild, !self.recent_emoji.is_empty());
                 self.menu = None;
                 self.emoji_picker = Some(OpenPicker {
                     picker,
@@ -439,17 +439,7 @@ impl App {
                 self.sync_members()
             }
             Ui::MembersScrolled(vp) => {
-                let remaining =
-                    vp.content_bounds().height - vp.bounds().height - vp.absolute_offset().y;
-                if remaining < 300.0
-                    && let Some(l) = &self.chat.member_list
-                    && l.has_more()
-                {
-                    self.member_rows_wanted = (l.loaded_end() + super::members::RANGE_SIZE)
-                        .min(super::members::MAX_RANGES * super::members::RANGE_SIZE);
-                    return self.sync_members();
-                }
-                Task::none()
+                self.members_scrolled(vp.absolute_offset().y, vp.bounds().height)
             }
             Ui::ToggleStatusMenu => {
                 self.status_menu = !self.status_menu;
@@ -659,6 +649,9 @@ impl App {
         if self.lightbox.take().is_some() {
             return Task::none();
         }
+        if self.friends.switcher.take().is_some() || self.friends.confirm_remove.take().is_some() {
+            return Task::none();
+        }
         if self.emoji_picker.take().is_some()
             || self.gif_picker.take().is_some()
             || self.sticker_picker.take().is_some()
@@ -679,7 +672,22 @@ impl App {
         {
             return Task::none();
         }
-        if self.pending_delete.take().is_some() || self.pending_link.take().is_some() {
+        if self.pending_delete.take().is_some()
+            || self.pending_link.take().is_some()
+            || self.reactions.dialog.take().is_some()
+        {
+            return Task::none();
+        }
+        if self.member_dialog.is_some() || self.admin.roles.confirm_delete {
+            return self.update_roles(super::role_admin::RoleUi::CloseDialog);
+        }
+        if self.channel_dialog.is_some() {
+            return self.update_channel_admin(super::channel_admin::ChannelUi::Close);
+        }
+        if self.admin.dialog.is_some() {
+            return self.update_admin(super::guild_admin::AdminUi::CloseDialog);
+        }
+        if self.admin.settings.take().is_some() {
             return Task::none();
         }
         if self.settings_open {
@@ -709,6 +717,9 @@ impl App {
         let Some(change) = self.chat.toggle_reaction(c, m, &emoji) else {
             return Task::none();
         };
+        if change == ReactionChange::Added {
+            self.note_emoji([emoji.clone()]);
+        }
         if self.cfg.mock {
             return Task::none();
         }
@@ -921,6 +932,24 @@ impl App {
         }
     }
 
+    /// Puts `used` first in the recently used emoji and saves the list.
+    /// The write is a single small `meta` row, done in place (like the
+    /// server folders) so two quick uses can never be saved out of order.
+    pub(super) fn note_emoji(&mut self, used: impl IntoIterator<Item = Emoji>) {
+        let mut changed = false;
+        for e in used {
+            changed |= self.recent_emoji.record(e);
+        }
+        if !changed {
+            return;
+        }
+        if let Some(json) = self.recent_emoji.to_json()
+            && let Err(e) = self.store.set_meta(super::emoji::RECENT_KEY, &json)
+        {
+            tracing::warn!(error = %e, "could not save the recent emoji");
+        }
+    }
+
     /// Whether custom emoji `id` is Nitro-locked in the open channel.
     fn emoji_locked(&self, id: Snowflake) -> bool {
         let access = self.nitro_access();
@@ -1037,6 +1066,7 @@ impl App {
         match open.picker.target {
             PickerTarget::Composer => {
                 self.composer.push_str(&format!("{} ", e.composer_text()));
+                self.note_emoji([e]);
                 focus(composer_id())
             }
             PickerTarget::Reaction { channel, message } => {
@@ -1222,22 +1252,79 @@ impl App {
             }
             return Task::none();
         }
-        if self.chat.member_list.as_ref().map(|l| l.guild) != Some(guild) {
-            let mut list = MemberListState::new(guild);
-            if self.cfg.mock && guild == crate::mock::GUILD_RUST {
-                list.apply(&crate::mock::member_list());
+        let mut to_top = Task::none();
+        match self.chat.member_list.as_mut() {
+            Some(l) if l.guild == guild => l.switch_channel(channel),
+            _ => {
+                // Another server's list starts at its top.
+                to_top = iced::widget::operation::snap_to(
+                    crate::ui::members::scroll_id(),
+                    iced::widget::operation::RelativeOffset::START,
+                );
+                let mut list = MemberListState::new(guild, channel);
+                if self.cfg.mock && guild == crate::mock::GUILD_RUST {
+                    list.apply(&crate::mock::member_list());
+                }
+                self.chat.member_list = Some(list);
+                self.members_viewport.0 = 0.0;
             }
-            self.chat.member_list = Some(list);
-            self.member_rows_wanted = super::members::RANGE_SIZE;
         }
-        if !self.cfg.mock {
-            self.gateway.subscribe_members(MemberSubscription {
-                guild,
-                channel,
-                ranges: MemberListState::ranges_for(self.member_rows_wanted),
-            });
+        let ranges = self.member_ranges();
+        if let Some(l) = self.chat.member_list.as_mut() {
+            l.set_ranges(&ranges);
         }
-        Task::none()
+        // Only recorded in mock mode (no gateway runs).
+        self.gateway.subscribe_members(MemberSubscription {
+            guild,
+            channel,
+            ranges,
+        });
+        to_top
+    }
+
+    /// The member sidebar scrolled to `y` (its height is `height`): draw
+    /// and subscribe to the rows there.
+    pub(crate) fn members_scrolled(&mut self, y: f32, height: f32) -> Task<Message> {
+        let before = self.member_window();
+        self.members_viewport = (y, height);
+        let sync = self.sync_members();
+        if self.member_window() != before {
+            Task::batch([sync, self.request_images()])
+        } else {
+            sync
+        }
+    }
+
+    /// What the member list subscription (op 14) asks for now.
+    pub fn member_subscription(&self) -> Option<MemberSubscription> {
+        self.gateway.members()
+    }
+
+    /// Rows of the member list drawn now (from the sidebar's scroll
+    /// position), with a small overscan.
+    pub(crate) fn member_window(&self) -> std::ops::Range<usize> {
+        let Some(l) = &self.chat.member_list else {
+            return 0..0;
+        };
+        let (y, h) = self.members_viewport;
+        crate::ui::members::ROWS.window(
+            &l.header_rows(),
+            l.len(),
+            y,
+            h,
+            crate::ui::members::OVERSCAN,
+        )
+    }
+
+    /// Ranges to subscribe to for the visible rows (`[0, 99]` before the
+    /// list is known).
+    fn member_ranges(&self) -> Vec<(usize, usize)> {
+        let Some(l) = &self.chat.member_list else {
+            return MemberListState::ranges_for_window(0, 0);
+        };
+        let (y, h) = self.members_viewport;
+        let w = crate::ui::members::ROWS.window(&l.header_rows(), l.len(), y, h, 0);
+        MemberListState::ranges_for_window(w.start, w.end.saturating_sub(1))
     }
 
     /// Status menu, tray and settings: applied at once (op 3) and saved

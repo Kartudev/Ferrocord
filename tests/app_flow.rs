@@ -361,11 +361,12 @@ fn reactions_toggle_and_picker_flows() {
             message: m.id,
         }),
     );
-    // The mock server has custom emoji, so it opens there.
-    assert!(matches!(
+    // The mock account has recently used emoji, so it opens on them.
+    assert_eq!(
         a.emoji_picker.as_ref().unwrap().picker.section,
-        Section::Server(_)
-    ));
+        Section::Recent
+    );
+    let _ = ferrocord::ui::view(&a);
     ui(&mut a, Ui::EmojiQuery("crab".into()));
     let _ = ferrocord::ui::view(&a);
     ui(&mut a, Ui::PickEmoji(Emoji::unicode("🦀")));
@@ -390,6 +391,64 @@ fn reactions_toggle_and_picker_flows() {
         }),
     );
     assert_eq!(a.composer.text(), "🍕 <:ferris:1001> ");
+    // Reacting and picking put the emoji first in the recently used ones.
+    let recent: Vec<&str> = a
+        .recent_emoji
+        .list()
+        .iter()
+        .take(3)
+        .map(|e| e.name.as_str())
+        .collect();
+    assert_eq!(recent, vec!["ferris", "🍕", "🦀"]);
+}
+
+#[test]
+fn recent_emoji_follow_sent_messages_and_reactions() {
+    let mut a = app();
+    let m = last_of(&a, 3);
+    // Without recent emoji the picker opens on the server's custom emoji.
+    a.recent_emoji = Default::default();
+    ui(
+        &mut a,
+        Ui::OpenEmojiPicker(PickerTarget::Reaction {
+            channel: mock::CH_GENERAL,
+            message: m.id,
+        }),
+    );
+    assert!(matches!(
+        a.emoji_picker.as_ref().unwrap().picker.section,
+        Section::Server(_)
+    ));
+    ui(&mut a, Ui::CloseEmojiPicker);
+    // Emoji written in a sent message count as used, in order.
+    a.composer.set_text("gg 🎉 <:party:1002> 🎉");
+    ui(&mut a, Ui::Send);
+    let names = |a: &ferrocord::app::App| -> Vec<String> {
+        a.recent_emoji
+            .list()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&a), vec!["🎉", "party"]);
+    // Adding a reaction counts; removing it does not.
+    ui(&mut a, Ui::ToggleReaction(m.id, Emoji::unicode("🔥")));
+    ui(&mut a, Ui::ToggleReaction(m.id, Emoji::unicode("🎉")));
+    ui(&mut a, Ui::ToggleReaction(m.id, Emoji::unicode("🔥")));
+    assert_eq!(names(&a), vec!["🎉", "🔥", "party"]);
+    // The picker now opens on them, and the hover bar offers them.
+    ui(
+        &mut a,
+        Ui::OpenEmojiPicker(PickerTarget::Reaction {
+            channel: mock::CH_GENERAL,
+            message: m.id,
+        }),
+    );
+    assert_eq!(
+        a.emoji_picker.as_ref().unwrap().picker.section,
+        Section::Recent
+    );
+    let _ = ferrocord::ui::view(&a);
 }
 
 #[test]

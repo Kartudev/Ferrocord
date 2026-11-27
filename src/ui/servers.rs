@@ -36,7 +36,7 @@ pub fn discover_search_id() -> iced::widget::Id {
 
 /// Dimmed full-window backdrop with `card` in the middle; a click outside
 /// the card closes it.
-fn modal<'a>(card: El<'a>, close: Ui) -> El<'a> {
+pub(crate) fn modal<'a>(card: El<'a>, close: Ui) -> El<'a> {
     opaque(
         mouse_area(
             container(opaque(card))
@@ -50,7 +50,7 @@ fn modal<'a>(card: El<'a>, close: Ui) -> El<'a> {
     )
 }
 
-fn heading<'a>(app: &App, title: &str, sub: &str) -> El<'a> {
+pub(super) fn heading<'a>(app: &App, title: &str, sub: &str) -> El<'a> {
     let p = app.theme.palette;
     column![
         text(title.to_owned())
@@ -69,7 +69,7 @@ fn heading<'a>(app: &App, title: &str, sub: &str) -> El<'a> {
     .into()
 }
 
-fn label<'a>(app: &App, s: &str) -> El<'a> {
+pub(super) fn label<'a>(app: &App, s: &str) -> El<'a> {
     text(s.to_uppercase())
         .size(12)
         .font(INTER_SEMIBOLD)
@@ -77,7 +77,7 @@ fn label<'a>(app: &App, s: &str) -> El<'a> {
         .into()
 }
 
-fn primary<'a>(app: &App, s: &str, msg: Option<Ui>) -> El<'a> {
+pub(super) fn primary<'a>(app: &App, s: &str, msg: Option<Ui>) -> El<'a> {
     let p = app.theme.palette;
     let b = button(
         text(s.to_owned())
@@ -94,7 +94,7 @@ fn primary<'a>(app: &App, s: &str, msg: Option<Ui>) -> El<'a> {
     .into()
 }
 
-fn secondary<'a>(app: &App, s: &str, msg: Ui) -> El<'a> {
+pub(super) fn secondary<'a>(app: &App, s: &str, msg: Ui) -> El<'a> {
     let p = app.theme.palette;
     button(
         text(s.to_owned())
@@ -108,7 +108,7 @@ fn secondary<'a>(app: &App, s: &str, msg: Ui) -> El<'a> {
     .into()
 }
 
-fn error_line<'a>(app: &App, e: &Option<String>) -> El<'a> {
+pub(super) fn error_line<'a>(app: &App, e: &Option<String>) -> El<'a> {
     match e {
         Some(e) => text(e.clone())
             .size(13)
@@ -118,7 +118,7 @@ fn error_line<'a>(app: &App, e: &Option<String>) -> El<'a> {
     }
 }
 
-fn close_button<'a>(app: &App, msg: Ui) -> El<'a> {
+pub(super) fn close_button<'a>(app: &App, msg: Ui) -> El<'a> {
     let p = app.theme.palette;
     button(icon(Icon::X, 20.0, p.text_secondary))
         .padding(4)
@@ -127,7 +127,11 @@ fn close_button<'a>(app: &App, msg: Ui) -> El<'a> {
         .into()
 }
 
-fn card<'a>(app: &App, body: iced::widget::Column<'a, crate::app::Message>, width: f32) -> El<'a> {
+pub(super) fn card<'a>(
+    app: &App,
+    body: iced::widget::Column<'a, crate::app::Message>,
+    width: f32,
+) -> El<'a> {
     container(body.spacing(16))
         .width(width)
         .padding(24)

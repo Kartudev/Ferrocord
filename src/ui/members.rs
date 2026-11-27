@@ -6,11 +6,28 @@ use iced::{Alignment, Color, Length, Padding};
 use super::theme::{self, INTER_MEDIUM, INTER_SEMIBOLD};
 use super::{El, avatar_with_presence, cosmetics};
 use crate::app::anim::{Hover, Zone};
-use crate::app::members::MemberListState;
+use crate::app::members::{MemberListState, RowMetrics};
 use crate::app::{App, Message, Ui};
 use crate::net::model::*;
 
 pub const WIDTH: f32 = 240.0;
+
+/// Fixed row heights: the window of rows to draw (and to subscribe to)
+/// comes from the scroll offset, so a 100 000-row list costs as much as a
+/// short one.
+pub const ROWS: RowMetrics = RowMetrics {
+    top_pad: 16.0,
+    member: 44.0,
+    header: 40.0,
+};
+/// Rows drawn above and below the visible ones.
+pub const OVERSCAN: usize = 8;
+const BOTTOM_PAD: f32 = 8.0;
+
+/// Id of the member list scrollable.
+pub fn scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("member-list")
+}
 
 pub fn view(app: &App) -> El<'_> {
     let p = app.theme.palette;
@@ -18,33 +35,37 @@ pub fn view(app: &App) -> El<'_> {
         return Space::new().width(0).into();
     };
     let guild = app.chat.guild(list.guild);
-    let mut col = column![].padding(Padding::from([8, 8]).top(16));
-    let mut loaded = false;
-    for item in list.loaded() {
-        loaded = true;
-        match item {
-            MemberItem::Group { id, count } => {
-                if id.is_empty() {
-                    continue;
-                }
-                col = col.push(
-                    container(
-                        text(format!(
-                            "{} \u{2014} {count}",
-                            MemberListState::group_label(id, guild).to_uppercase()
-                        ))
-                        .size(12)
-                        .font(INTER_SEMIBOLD)
-                        .color(p.text_muted)
-                        .wrapping(text::Wrapping::None),
-                    )
-                    .padding(Padding::from([0, 8]).top(20).bottom(4)),
-                );
-            }
-            MemberItem::Member(m) => col = col.push(member_row(app, m, guild)),
-        }
+    let headers = list.header_rows();
+    let window = app.member_window();
+    let mut col = column![Space::new().height(ROWS.offset(&headers, window.start))]
+        .padding(Padding::from([0, 8]));
+    for i in window.clone() {
+        let is_header = headers.binary_search(&i).is_ok();
+        let height = if is_header { ROWS.header } else { ROWS.member };
+        let row: El<'_> = match list.get(i) {
+            Some(MemberItem::Group { id, count }) if !id.is_empty() => container(
+                text(format!(
+                    "{} \u{2014} {count}",
+                    MemberListState::group_label(id, guild).to_uppercase()
+                ))
+                .size(12)
+                .font(INTER_SEMIBOLD)
+                .color(p.text_muted)
+                .wrapping(text::Wrapping::None),
+            )
+            .padding(Padding::from([0, 8]).bottom(4))
+            .align_y(iced::alignment::Vertical::Bottom)
+            .into(),
+            Some(MemberItem::Member(m)) => member_row(app, m, guild),
+            // Not loaded yet (or an item we could not read): a skeleton of
+            // the same height, like the official client.
+            _ => placeholder(app, i, is_header),
+        };
+        col = col.push(container(row).width(Length::Fill).height(height).clip(true));
     }
-    if !loaded {
+    let below = ROWS.total(&headers, list.len()) - ROWS.offset(&headers, window.end);
+    col = col.push(Space::new().height(below.max(0.0) + BOTTOM_PAD));
+    if list.is_empty() {
         col = col.push(
             container(text("Loading members\u{2026}").size(14).color(p.text_muted))
                 .padding(16)
@@ -53,6 +74,7 @@ pub fn view(app: &App) -> El<'_> {
     }
     container(super::smooth_scroll::smooth(
         scrollable(col)
+            .id(scroll_id())
             .direction(scrollable::Direction::Vertical(
                 scrollable::Scrollbar::new().width(4).scroller_width(4),
             ))
@@ -63,6 +85,30 @@ pub fn view(app: &App) -> El<'_> {
     .width(WIDTH)
     .height(Length::Fill)
     .style(theme::bg(p.bg_sidebar))
+    .into()
+}
+
+/// Grey avatar and name bar for a row that is not loaded.
+fn placeholder<'a>(app: &App, index: usize, header: bool) -> El<'a> {
+    let p = app.theme.palette;
+    let bar = |w: f32, h: f32| {
+        container(Space::new().width(w).height(h)).style(theme::rounded_bg(p.bg_hover, h / 2.0))
+    };
+    // Varying name widths, stable per row.
+    let w = 60.0 + ((index * 37) % 70) as f32;
+    if header {
+        return container(bar(w, 10.0))
+            .padding(Padding::from([0, 8]).bottom(6))
+            .height(Length::Fill)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .into();
+    }
+    container(
+        row![bar(32.0, 32.0), bar(w, 12.0)]
+            .spacing(12)
+            .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([6, 8]))
     .into()
 }
 

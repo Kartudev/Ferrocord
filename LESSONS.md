@@ -97,3 +97,24 @@ Things learned while building Ferrocord that are worth remembering.
   GLib under `dbus-run-session`) and the dbusmenu `Event(id, "clicked", ...)` call a panel makes.
 - **Self-update**: on Linux `std::env::current_exe()` of a binary that was renamed over reads `/path (deleted)`; restart the path the installer wrote. Windows cannot overwrite or delete a running `.exe` but can rename it, so updates move it aside to `.old` and delete it at the next start. Stage files in the target's own folder so `rename` stays atomic (no cross-filesystem copy). Safe extraction means writing files yourself from the archive entries (never `unpack`), rejecting links and `..`, and counting the bytes actually read.
 - winit `dlopen`s `libxkbcommon-x11.so.0` on X11 (no link, so `ldd` and the `-dev` build packages never pull it in) and panics with exit 101 ("Library libxkbcommon-x11.so could not be loaded") when it is missing. Stock GitHub runners lack it: CI that starts the real binary under Xvfb must install `libxkbcommon-x11-0`. Reproduce by bind-mounting `/dev/null` over the library in `unshare -m`.
+- **"Texts got broken" (boxes for names, timestamps, headers; blank digits in messages).** Two causes together.
+  (1) `iced::font::load` is executed by iced_winit only when a compositor exists (`if let Some(compositor)`), and an
+  `iced::daemon` creates it with the first window: started with `--minimized` / autostart, the boot `font::load`
+  tasks were silently dropped and Inter never existed (unnoticed on machines with a system Inter, e.g. Debian's
+  `fonts-inter`). Load bundled fonts into `font_system().write().raw()` in `main` instead. (2) With the requested
+  face missing, cosmic-text's Basic shaping (iced `Shaping::Auto` for ASCII text) takes the FIRST fallback font
+  without checking coverage; Twemoji was first, has only `#*0-9`, so letters became `.notdef` boxes and digits its
+  blank keycap bases (Advanced shaping fell through to other fonts, so non-ASCII names showed in DejaVu/mono).
+  A face whose PostScript name contains "Emoji" matches every style in cosmic-text, so it also outranked a missing
+  italic. Keep the UI family first in the fallback and bundle every style the views use. Reproduce with
+  `FONTCONFIG_FILE` pointing at a conf with only DejaVu, `--mock --minimized` under `dbus-run-session` (no tray
+  host, so the window opens later).
+- **"Not all members show up" (v0.20.0).** Four causes, each reproduced with a reducer test: the sidebar never
+  subscribed past row 499 (five fixed ranges) and only drew loaded rows; a channel switch in the same server kept the
+  previous channel's rows and applied that list's later INSERT/DELETEs (lists are per *list id*: `everyone` or a hash of
+  the channel's view overwrites); INSERTs were dropped once 1500 rows existed, shifting every later row; and one
+  unreadable member item failed the whole `GUILD_MEMBER_LIST_UPDATE`. Match the official client: `[0,99]` plus the chunks
+  at the scroll position (three ranges), the length from `groups`, a sparse map of the subscribed ranges, fixed row
+  heights so the visible window is plain arithmetic, and per-item lenient parsing that keeps every slot.
+- Group DMs change members through `CHANNEL_RECIPIENT_ADD/REMOVE`, not through the channel object: without them a
+  person added to a group appeared only after a restart.

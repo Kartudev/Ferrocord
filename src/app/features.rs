@@ -34,6 +34,9 @@ impl App {
         if let Some(t) = self.update_context(u.clone()) {
             return t;
         }
+        if let Some(t) = self.update_reactions(u.clone()) {
+            return t;
+        }
         match u {
             // -- header
             Ui::TogglePopover(k) => self.toggle_popover(k),
@@ -408,30 +411,7 @@ impl App {
         if self.cfg.mock {
             return Task::none();
         }
-        Task::perform(
-            async {
-                let picked = rfd::AsyncFileDialog::new()
-                    .set_title("Choose a server icon")
-                    .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
-                    .pick_file()
-                    .await?;
-                let path = picked.path().to_path_buf();
-                let too_big = tokio::fs::metadata(&path)
-                    .await
-                    .map(|m| m.len() > extras::MAX_ICON_BYTES as u64)
-                    .unwrap_or(false);
-                if too_big {
-                    return Some(Err("That image is too large (4 MB at most).".to_owned()));
-                }
-                Some(match tokio::fs::read(&path).await {
-                    Ok(bytes) => icon_data_uri(&bytes)
-                        .map(|uri| (path, uri))
-                        .map_err(str::to_owned),
-                    Err(_) => Err("That file could not be read.".to_owned()),
-                })
-            },
-            |r| Message::Done(Done::IconPicked(r)),
-        )
+        Task::perform(pick_icon_file(), |r| Message::Done(Done::IconPicked(r)))
     }
 
     pub(super) fn on_icon_picked(
@@ -754,4 +734,28 @@ impl App {
         };
         extras::parse_search_query(input, user, channel)
     }
+}
+
+/// Server icon file dialog: `(path, data URI)`, the reason the file was
+/// refused, or `None` when cancelled.
+pub(super) async fn pick_icon_file() -> Option<Result<(std::path::PathBuf, String), String>> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title("Choose a server icon")
+        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .pick_file()
+        .await?;
+    let path = picked.path().to_path_buf();
+    let too_big = tokio::fs::metadata(&path)
+        .await
+        .map(|m| m.len() > extras::MAX_ICON_BYTES as u64)
+        .unwrap_or(false);
+    if too_big {
+        return Some(Err("That image is too large (4 MB at most).".to_owned()));
+    }
+    Some(match tokio::fs::read(&path).await {
+        Ok(bytes) => icon_data_uri(&bytes)
+            .map(|uri| (path, uri))
+            .map_err(str::to_owned),
+        Err(_) => Err("That file could not be read.".to_owned()),
+    })
 }

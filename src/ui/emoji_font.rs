@@ -14,10 +14,19 @@
 //!
 //! The font has its own family name, "Ferrocord Twemoji", so no system face
 //! can shadow it (font lookup returns the first face of a family, and system
-//! fonts load first). [`install`] loads it zero-copy into iced's font system
-//! at startup and puts it first in cosmic-text's common fallback list: text
-//! that cannot take spans (the composer's `text_editor`, text inputs) gets
-//! Twemoji for every emoji the text font lacks, not the system emoji font.
+//! fonts load first). [`install`] loads it, and the UI font (Inter), zero-copy
+//! into iced's font system at startup and puts it in cosmic-text's common
+//! fallback list right after Inter: text that cannot take spans (the
+//! composer's `text_editor`, text inputs) gets Twemoji for every emoji the
+//! text font lacks, not the system emoji font.
+//!
+//! Twemoji must never be the FIRST fallback. Basic shaping (iced's `Auto`
+//! for ASCII text) takes the first fallback font as-is when the requested
+//! face is missing, without checking coverage, and Twemoji maps no letters:
+//! every glyph became `.notdef`, a box. Its PostScript name contains "Emoji",
+//! which cosmic-text matches for every style, so it also outranked a missing
+//! italic. Inter (every weight and style the views use is bundled) comes
+//! first, so a missing face resolves to real text.
 
 use std::sync::Arc;
 
@@ -36,24 +45,25 @@ pub fn emoji_font() -> Font {
     Font::with_name(FAMILY)
 }
 
-/// cosmic-text fallback: the platform lists, with Twemoji in front of the
-/// common fallbacks so it wins over the system emoji font.
-struct TwemojiFirst {
+/// cosmic-text fallback: the platform lists, with Inter and then Twemoji in
+/// front of the common fallbacks, so Twemoji wins over the system emoji font
+/// but never stands in for a missing text face.
+struct UiFallback {
     inner: cosmic_text::PlatformFallback,
     common: Vec<&'static str>,
 }
 
-impl TwemojiFirst {
+impl UiFallback {
     fn new() -> Self {
         use cosmic_text::Fallback;
         let inner = cosmic_text::PlatformFallback;
-        let mut common = vec![FAMILY];
+        let mut common = vec![crate::ui::theme::UI_FAMILY, FAMILY];
         common.extend(inner.common_fallback().iter().copied());
         Self { inner, common }
     }
 }
 
-impl cosmic_text::Fallback for TwemojiFirst {
+impl cosmic_text::Fallback for UiFallback {
     fn common_fallback(&self) -> &[&'static str] {
         &self.common
     }
@@ -67,26 +77,31 @@ impl cosmic_text::Fallback for TwemojiFirst {
     }
 }
 
-/// Loads the bundled Twemoji into `fs` without copying it and makes it the
-/// first common fallback.
+/// Loads the bundled UI fonts and Twemoji into `fs` without copying them
+/// and sets the fallback order (Inter, Twemoji, platform lists).
+///
+/// Inter is loaded before Twemoji: when no face matches a weight exactly,
+/// cosmic-text breaks ties between equally close faces by load order.
 pub fn install_into(fs: &mut cosmic_text::FontSystem) {
     let empty = cosmic_text::FontSystem::new_with_locale_and_db(
         String::new(),
         cosmic_text::fontdb::Database::new(),
     );
     let (locale, mut db) = std::mem::replace(fs, empty).into_locale_and_db();
+    for bytes in crate::ui::theme::FONT_FILES {
+        db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
+    }
     db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(
         crate::ui::theme::TWEMOJI,
     )));
-    *fs = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
-        locale,
-        db,
-        TwemojiFirst::new(),
-    );
+    *fs =
+        cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(locale, db, UiFallback::new());
 }
 
-/// Installs Twemoji in iced's global font system. Call once in `main`,
-/// before the first frame.
+/// Installs Inter and Twemoji in iced's global font system. Call once in
+/// `main`, before `run`: this works without a window, unlike
+/// `iced::font::load`, which a daemon drops while no window (and so no
+/// renderer) exists, e.g. when started with `--minimized`.
 pub fn install() {
     let mut fs = iced::advanced::graphics::text::font_system()
         .write()
@@ -203,7 +218,8 @@ mod tests {
         Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent,
     };
 
-    /// A font system with only Twemoji, built the way `install` builds it.
+    /// A font system with only the bundled fonts (no system font at all),
+    /// built the way `install` builds it.
     fn twemoji_only() -> FontSystem {
         let mut fs = FontSystem::new_with_locale_and_db(
             "en-US".into(),
@@ -307,7 +323,10 @@ mod tests {
     #[test]
     fn fallback_prefers_twemoji_over_system_fonts() {
         use cosmic_text::Fallback;
-        assert_eq!(TwemojiFirst::new().common_fallback().first(), Some(&FAMILY));
+        assert_eq!(
+            UiFallback::new().common_fallback()[..2],
+            [crate::ui::theme::UI_FAMILY, FAMILY]
+        );
         let mut fs = FontSystem::new();
         install_into(&mut fs);
         let mut buf = Buffer::new(&mut fs, Metrics::new(32.0, 40.0));
@@ -334,6 +353,105 @@ mod tests {
                 face.families
             );
         }
+    }
+
+    /// (family, glyph id) of every glyph of `s` shaped with `attrs`.
+    fn shaped(
+        fs: &mut FontSystem,
+        s: &str,
+        attrs: &Attrs<'_>,
+        shaping: Shaping,
+    ) -> Vec<(String, u16)> {
+        let mut buf = Buffer::new(fs, Metrics::new(16.0, 20.0));
+        buf.set_text(fs, s, attrs, shaping, None);
+        buf.shape_until_scroll(fs, false);
+        let glyphs: Vec<_> = buf
+            .layout_runs()
+            .flat_map(|r| r.glyphs.iter().map(|g| (g.font_id, g.glyph_id)))
+            .collect();
+        glyphs
+            .into_iter()
+            .map(|(id, glyph)| {
+                let family = fs.db().face(id).map(|f| f.families[0].0.clone());
+                (family.unwrap_or_default(), glyph)
+            })
+            .collect()
+    }
+
+    /// Regression (v0.19 "texts got broken"): the UI fonts were loaded with
+    /// `iced::font::load`, which the daemon drops while no window exists
+    /// (`--minimized`, autostart), so Inter was missing and ASCII text
+    /// (Basic shaping) took the first common fallback, Twemoji: boxes.
+    /// `install_into` alone must provide every face the views use.
+    #[test]
+    fn install_provides_every_ui_face() {
+        use crate::ui::theme::{INTER, INTER_BOLD, INTER_ITALIC, INTER_MEDIUM, INTER_SEMIBOLD};
+        let fs = twemoji_only();
+        for font in [
+            INTER,
+            INTER_MEDIUM,
+            INTER_SEMIBOLD,
+            INTER_BOLD,
+            INTER_ITALIC,
+        ] {
+            let attrs = iced::advanced::graphics::text::to_attributes(font);
+            let face = fs.db().faces().find(|f| {
+                f.families
+                    .iter()
+                    .any(|(n, _)| n == crate::ui::theme::UI_FAMILY)
+                    && f.weight == attrs.weight
+                    && f.style == attrs.style
+            });
+            assert!(face.is_some(), "no bundled face for {font:?}");
+        }
+    }
+
+    /// Latin text never lands on Twemoji or `.notdef`, whatever face is
+    /// asked for (every weight, both styles, a family that does not exist)
+    /// and whichever shaping iced picks, with no system font installed.
+    #[test]
+    fn text_never_falls_back_to_twemoji() {
+        let mut fs = twemoji_only();
+        let families = [
+            Family::Name(crate::ui::theme::UI_FAMILY),
+            Family::Name("No Such Family"),
+            Family::SansSerif,
+            Family::Monospace,
+        ];
+        for family in families {
+            for weight in (100..=900).step_by(100) {
+                for style in [cosmic_text::Style::Normal, cosmic_text::Style::Italic] {
+                    for shaping in [Shaping::Basic, Shaping::Advanced] {
+                        let attrs = Attrs::new()
+                            .family(family)
+                            .weight(cosmic_text::Weight(weight))
+                            .style(style);
+                        let s = "Friends 0123 #general Base A\u{E9}rea";
+                        let glyphs = shaped(&mut fs, s, &attrs, shaping);
+                        assert!(!glyphs.is_empty());
+                        for (f, g) in glyphs {
+                            let what =
+                                format!("{family:?} {weight} {style:?} {shaping:?}: {f} {g}");
+                            assert_ne!(f, FAMILY, "{what}");
+                            assert_ne!(g, 0, "{what}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The composer's case: Inter text with emoji, no spans. Letters stay
+    /// Inter, emoji come from Twemoji.
+    #[test]
+    fn emoji_in_inter_text_use_twemoji() {
+        let mut fs = twemoji_only();
+        let attrs = Attrs::new().family(Family::Name(crate::ui::theme::UI_FAMILY));
+        let glyphs = shaped(&mut fs, "hi\u{1F980}ok\u{2615}", &attrs, Shaping::Advanced);
+        let families: Vec<&str> = glyphs.iter().map(|(f, _)| f.as_str()).collect();
+        let ui = crate::ui::theme::UI_FAMILY;
+        assert_eq!(families, [ui, ui, FAMILY, ui, ui, FAMILY], "{glyphs:?}");
+        assert!(glyphs.iter().all(|(_, g)| *g != 0), "{glyphs:?}");
     }
 
     fn kinds(s: &str) -> Vec<(bool, String)> {

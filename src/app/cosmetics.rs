@@ -310,7 +310,7 @@ impl App {
             }
         }
         if let Some(l) = &self.chat.member_list {
-            for item in l.loaded().take(120) {
+            for item in l.loaded_in(self.member_window()) {
                 if let MemberItem::Member(m) = item {
                     user_urls(cdn, &mut urls, &m.user, true, true);
                 }

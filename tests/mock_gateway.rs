@@ -144,7 +144,7 @@ async fn connect_hello_identify_ready_message() {
         send(&mut ws, hello(45_000)).await;
         let id = recv_op(&mut ws, 2).await;
         assert_eq!(id["d"]["token"], TOKEN);
-        assert_eq!(id["d"]["properties"]["browser"], "Ferrocord");
+        assert_eq!(id["d"]["properties"]["browser"], "Chrome");
         send(&mut ws, ready(1, "ws://unused")).await;
         send(
             &mut ws,

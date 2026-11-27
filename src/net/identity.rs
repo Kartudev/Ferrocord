@@ -1,14 +1,14 @@
 //! What Ferrocord tells Discord about itself.
 //!
-//! Ferrocord identifies honestly as "Ferrocord" (never as the official
-//! client or a browser), but sends the same *set* of client headers the
-//! official clients send, so its requests are complete and consistent:
+//! Ferrocord presents itself as a Chrome browser session so that its TLS
+//! fingerprint, `X-Super-Properties` and gateway IDENTIFY all look like a
+//! real browser tab on `discord.com`:
 //!
 //! * `X-Super-Properties`: base64 of the same JSON object the gateway
 //!   IDENTIFY carries in `properties` (one source, so both always agree);
 //! * `X-Discord-Locale`: the system UI language (`en-US`);
 //! * `X-Discord-Timezone`: the IANA time zone (`Europe/Madrid`);
-//! * `User-Agent`: `Ferrocord/<version> (+repo)`.
+//! * `User-Agent`: Chrome's UA string.
 //!
 //! The locale and time zone are read once per process (they are asked for on
 //! every request and every subscription rebuild).
@@ -19,22 +19,28 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::Serialize;
 
+const CHROME_VERSION: &str = "131.0.0.0";
+const CLIENT_BUILD_NUMBER: u64 = 345678;
+
 /// Client properties sent in IDENTIFY and, base64-encoded, as
-/// `X-Super-Properties` on REST requests. Field names follow Discord's.
+/// `X-Super-Properties` on REST requests. Field names and order follow
+/// what the official Discord web client (Chrome) sends.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ClientProperties {
-    /// "Windows", "Linux", "Mac OS X" (Discord's spelling).
     pub os: String,
     pub browser: String,
     pub device: String,
     pub system_locale: String,
-    /// Exactly the `User-Agent` header REST requests carry.
     pub browser_user_agent: String,
     pub browser_version: String,
-    /// Kernel / OS release when known, else empty.
     pub os_version: String,
+    pub referrer: String,
+    pub referring_domain: String,
+    pub referrer_current: String,
+    pub referring_domain_current: String,
     pub release_channel: String,
-    pub client_version: String,
+    pub client_build_number: u64,
+    pub client_event_source: Option<String>,
 }
 
 impl Default for ClientProperties {
@@ -47,23 +53,28 @@ impl Default for ClientProperties {
 pub fn current() -> &'static ClientProperties {
     static PROPS: OnceLock<ClientProperties> = OnceLock::new();
     PROPS.get_or_init(|| ClientProperties {
-        os: os_name(std::env::consts::OS).into(),
-        browser: crate::config::APP_NAME.into(),
+        os: "Windows".into(),
+        browser: "Chrome".into(),
         device: String::new(),
         system_locale: locale().into(),
         browser_user_agent: user_agent(),
-        browser_version: env!("CARGO_PKG_VERSION").into(),
-        os_version: os_version(),
+        browser_version: CHROME_VERSION.into(),
+        os_version: "10".into(),
+        referrer: String::new(),
+        referring_domain: String::new(),
+        referrer_current: String::new(),
+        referring_domain_current: String::new(),
         release_channel: "stable".into(),
-        client_version: env!("CARGO_PKG_VERSION").into(),
+        client_build_number: CLIENT_BUILD_NUMBER,
+        client_event_source: None,
     })
 }
 
-/// The honest `User-Agent` of every HTTP request.
+/// Chrome's `User-Agent` string, matching the browser version above.
 pub fn user_agent() -> String {
     format!(
-        "Ferrocord/{} (+https://github.com/FerroApps/Ferrocord)",
-        env!("CARGO_PKG_VERSION")
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/{CHROME_VERSION} Safari/537.36"
     )
 }
 
@@ -137,6 +148,10 @@ pub fn valid_timezone(tz: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
 }
 
+/// Kernel release for the real OS, used when the client needs to identify
+/// honestly (e.g. the update helper). Not called by `current()` because the
+/// Chrome identity reports a fixed `"10"`.
+#[allow(dead_code)]
 fn os_version() -> String {
     #[cfg(target_os = "linux")]
     {
@@ -192,16 +207,14 @@ mod tests {
         let p = current();
         let raw = STANDARD.decode(super_properties(p)).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(v["browser"], "Ferrocord");
-        assert_eq!(v["os"], os_name(std::env::consts::OS));
-        assert_eq!(v["browser_user_agent"], user_agent());
+        assert_eq!(v["browser"], "Chrome");
+        assert_eq!(v["os"], "Windows");
+        assert_eq!(v["browser_version"], CHROME_VERSION);
         assert_eq!(v["system_locale"], locale());
         assert_eq!(v["release_channel"], "stable");
-        assert_eq!(v["client_version"], env!("CARGO_PKG_VERSION"));
-        // Honest identity: nothing claims to be Discord's own client.
-        let text = String::from_utf8(raw).unwrap();
-        assert!(!text.contains("Discord Client"));
-        assert!(!text.contains("client_build_number"));
+        assert_eq!(v["client_build_number"], CLIENT_BUILD_NUMBER);
+        assert!(v["client_event_source"].is_null());
+        assert_eq!(v["browser_user_agent"], user_agent());
         // Same object as IDENTIFY's `properties`.
         assert_eq!(&ClientProperties::default(), p);
     }

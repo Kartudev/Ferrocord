@@ -19,6 +19,8 @@ use crate::auth::secrets::Secret;
 use crate::error::{Error, Result};
 
 mod ext;
+mod friends;
+pub mod guild;
 mod settings;
 pub use settings::ProfileEdit;
 mod voice;
@@ -451,6 +453,36 @@ impl RestClient {
         );
         let method = if add { Method::PUT } else { Method::DELETE };
         self.request(method, &path, None).await.map(|_| ())
+    }
+
+    /// `GET /channels/{c}/messages/{m}/reactions/{emoji}?limit=&type=` —
+    /// who reacted (`type=1`: burst / super reactions), in user id order;
+    /// `after` continues a list.
+    pub async fn reactions(
+        &self,
+        channel: ChannelId,
+        message: MessageId,
+        emoji: &Emoji,
+        burst: bool,
+        limit: u32,
+        after: Option<UserId>,
+    ) -> Result<Vec<User>> {
+        let mut path = format!(
+            "/channels/{channel}/messages/{message}/reactions/{}?limit={}&type={}",
+            emoji.api_segment(),
+            limit.clamp(1, 100),
+            u8::from(burst)
+        );
+        if let Some(a) = after {
+            path.push_str(&format!("&after={a}"));
+        }
+        let wire: Vec<Value> = self.get(&path).await?;
+        // A user we cannot read is skipped, not the whole page.
+        Ok(wire
+            .into_iter()
+            .filter_map(|u| serde_json::from_value::<WireUser>(u).ok())
+            .map(User::from)
+            .collect())
     }
 
     /// `GET /channels/{c}/messages?around={m}` — a window centred on a

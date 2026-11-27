@@ -4,6 +4,7 @@
 pub mod actions;
 pub mod anim;
 mod background;
+pub mod channel_admin;
 pub mod composer;
 pub mod context;
 pub mod cosmetics;
@@ -11,22 +12,30 @@ pub mod embeds;
 pub mod emoji;
 pub mod features;
 pub mod folders;
+pub mod friends;
 pub mod gif_anim;
 pub mod gifs;
+pub mod guild_admin;
 pub mod images;
 pub mod input;
 pub mod jump;
 pub mod lightbox;
+#[cfg(test)]
+mod list_flows;
 pub mod markdown;
 pub mod media_anim;
 pub mod members;
 pub mod message;
 pub mod nitro;
 pub mod notify;
+mod opener;
 pub mod panels;
+pub mod permissions;
 pub mod plugins;
 pub mod profile;
 pub mod rail;
+pub mod reactions;
+pub mod role_admin;
 pub mod search;
 pub mod servers;
 pub mod settings;
@@ -138,6 +147,8 @@ pub struct App {
     /// Right-click menu of a user or channel.
     pub ctx_menu: Option<context::CtxMenu>,
     pub emoji_picker: Option<OpenPicker>,
+    /// Recently used emoji (picker section, quick reactions).
+    pub recent_emoji: emoji::Recent,
     pub gif_picker: Option<gifs::GifPicker>,
     /// Decoded GIF picker stills, keyed by the GIF's page URL (own small
     /// LRU so they never push avatars and messages out).
@@ -159,12 +170,24 @@ pub struct App {
     upload_handles: HashMap<u64, iced::task::Handle>,
     next_upload_id: u64,
     pub members_open: bool,
-    member_rows_wanted: usize,
+    /// Member sidebar scroll position and height (y, height): picks the
+    /// rows drawn and the ranges subscribed.
+    pub members_viewport: (f32, f32),
+    /// Who reacted: hover tooltips and the reactions dialog.
+    pub reactions: reactions::ReactionsUi,
     pub status_menu: bool,
     pub search: search::SearchState,
     /// Channel-header popovers (bell, pins, inbox).
     pub panels: features::Panels,
     pub server_dialog: Option<servers::ServerDialog>,
+    /// Server administration dialogs and the Server Settings screen.
+    pub admin: guild_admin::Admin,
+    /// Create / edit / delete channel dialog.
+    pub channel_dialog: Option<channel_admin::ChannelDialog>,
+    /// Member roles / moderation dialog.
+    pub member_dialog: Option<role_admin::MemberDialog>,
+    /// Friends page, Message Requests and the conversation switcher.
+    pub friends: friends::FriendsState,
     pub discover: Option<servers::DiscoverState>,
     /// Server rail interaction (folders, drag and drop, menus).
     pub rail: rail::RailUi,
@@ -254,6 +277,7 @@ impl App {
         });
 
         let prefs = Prefs::load(&store);
+        let recent_emoji = emoji::Recent::load(&store);
         let local_settings = settings::LocalSettings::load(&store);
         let voice = voice::Voice::with_prefs(App::load_voice_prefs(&store));
         let updater = updates::new_updater(&cfg, &store);
@@ -291,6 +315,7 @@ impl App {
             menu: None,
             ctx_menu: None,
             emoji_picker: None,
+            recent_emoji,
             gif_picker: None,
             gif_thumbs: images::ImageCache::new(gifs::THUMB_BUDGET),
             gif_favorites: gifs::Favorites::default(),
@@ -309,11 +334,16 @@ impl App {
             upload_handles: HashMap::new(),
             next_upload_id: 0,
             members_open: true,
-            member_rows_wanted: members::RANGE_SIZE,
+            members_viewport: (0.0, 800.0),
+            reactions: reactions::ReactionsUi::default(),
             status_menu: false,
             search: search::SearchState::default(),
             panels: features::Panels::default(),
             server_dialog: None,
+            admin: guild_admin::Admin::default(),
+            channel_dialog: None,
+            member_dialog: None,
+            friends: friends::FriendsState::default(),
             discover: None,
             rail: rail::RailUi::default(),
             pending_select: None,
@@ -367,12 +397,10 @@ impl App {
             )
         };
 
-        let fonts = Task::batch(
-            crate::ui::theme::FONT_FILES
-                .iter()
-                .map(|f| iced::font::load(*f).map(|_| Message::Done(Done::Ignored))),
-        )
-        .chain(Task::done(Message::Done(Done::FontsLoaded)));
+        // The UI fonts are already in iced's font system (`emoji_font::install`
+        // in `main`): `iced::font::load` is dropped while no window exists
+        // (`--minimized`, autostart), which left the UI without Inter.
+        let fonts = Task::done(Message::Done(Done::FontsLoaded));
 
         let restore = if app.cfg.mock {
             app.boot_mock();
@@ -445,6 +473,11 @@ impl App {
     fn boot_mock(&mut self) {
         let ready = mock::ready();
         self.chat.load_ready(&ready);
+        // Game Night members (the mock user owns it): Alice plays.
+        self.chat.member_roles.insert(
+            (mock::GUILD_GAMES, Snowflake(2)),
+            vec![mock::ROLE_GAMES_PLAYERS],
+        );
         let me = ready.me.as_ref().map(|u| u.id);
         let _ = self.voice.apply(&Event::Ready(Box::new(ready.clone())), me);
         for c in ready.channels.iter().filter(|c| c.kind.is_textual()) {
@@ -477,6 +510,7 @@ impl App {
                 .insert(mock::gif_page_url(i + 1), handle, size);
         }
         self.gif_favorites.list = Some(mock::gif_favorites());
+        self.recent_emoji = mock::recent_emoji();
         let (w, h, px) = mock::mock_image(400, 225);
         self.images.insert(
             "mock://image/1".into(),
@@ -678,7 +712,11 @@ impl App {
                     ));
                     let guild = self.chat.guild(mock::GUILD_RUST);
                     self.emoji_picker = Some(OpenPicker {
-                        picker: emoji::EmojiPicker::open(emoji::PickerTarget::Composer, guild),
+                        picker: emoji::EmojiPicker::open(
+                            emoji::PickerTarget::Composer,
+                            guild,
+                            false,
+                        ),
                         at: iced::Point::new(1000.0, 725.0),
                     });
                 }
@@ -714,6 +752,19 @@ impl App {
                     user: mock::user(1),
                 };
                 self.mock_voice_screen(s);
+            }
+            Some(
+                s @ (ScreenshotScreen::Friends
+                | ScreenshotScreen::FriendsPending
+                | ScreenshotScreen::FriendsAdd
+                | ScreenshotScreen::MessageRequests
+                | ScreenshotScreen::Switcher),
+            ) => {
+                self.auth = AuthState::LoggedIn {
+                    user: mock::user(1),
+                };
+                self.view = View::Home(None);
+                self.mock_friends_screen(s);
             }
             Some(ScreenshotScreen::ProfileDm) => {
                 self.auth = AuthState::LoggedIn {
@@ -765,6 +816,7 @@ impl App {
         let ctx = self.ctx();
         self.chat
             .apply_event(&Event::MemberList(Box::new(mock::member_list())), &ctx);
+        self.mock_list_screens(screen);
         if screen == Some(ScreenshotScreen::Profile) {
             let _ = self.update_ui(Ui::OpenProfile {
                 user: Snowflake(2),
@@ -795,6 +847,7 @@ impl App {
             let mut picker = emoji::EmojiPicker::open(
                 emoji::PickerTarget::Composer,
                 self.chat.guild(mock::GUILD_RUST),
+                false,
             );
             picker.section = emoji::Section::Server(mock::GUILD_ICED);
             picker.locked = emoji::find_custom(&self.chat.guilds, Snowflake(1003))
@@ -803,6 +856,28 @@ impl App {
                 picker,
                 at: iced::Point::new(1000.0, 752.0),
             });
+        }
+        if screen == Some(ScreenshotScreen::EmojiRecent) {
+            // The reaction picker opens on the recently used emoji.
+            let target = self
+                .chat
+                .messages
+                .get(&mock::CH_GENERAL)
+                .and_then(|w| w.messages.back())
+                .map(|m| emoji::PickerTarget::Reaction {
+                    channel: mock::CH_GENERAL,
+                    message: m.id,
+                });
+            if let Some(target) = target {
+                self.emoji_picker = Some(actions::OpenPicker {
+                    picker: emoji::EmojiPicker::open(
+                        target,
+                        self.chat.guild(mock::GUILD_RUST),
+                        !self.recent_emoji.is_empty(),
+                    ),
+                    at: iced::Point::new(640.0, 300.0),
+                });
+            }
         }
         if screen == Some(ScreenshotScreen::StickersLocked) {
             self.sticker_picker = Some(stickers::StickerPicker {
@@ -817,7 +892,68 @@ impl App {
         }
     }
 
+    /// Sets up the Friends / Message Requests / switcher screenshots.
+    fn mock_friends_screen(&mut self, s: ScreenshotScreen) {
+        use friends::{AddStatus, FriendsTab, HomePage, Switcher};
+        let f = &mut self.friends;
+        match s {
+            ScreenshotScreen::FriendsPending => f.tab = FriendsTab::Pending,
+            ScreenshotScreen::FriendsAdd => {
+                f.tab = FriendsTab::AddFriend;
+                f.add_status = Some(AddStatus::Sent("zed_dev".into()));
+            }
+            ScreenshotScreen::MessageRequests => {
+                f.page = HomePage::Requests;
+                for c in [mock::DM_REQUEST, mock::DM_SPAM] {
+                    let w = self.chat.messages.entry(c).or_default();
+                    for m in mock::history(c) {
+                        w.upsert(m);
+                    }
+                }
+            }
+            ScreenshotScreen::Switcher => {
+                f.switcher = Some(Switcher { query: "a".into() });
+            }
+            _ => {}
+        }
+    }
+
     /// Opens the popover / dialog / page a round-3 screenshot shows.
+    /// `reactions` (the dialog) and `members-large` (a 3000-member list
+    /// scrolled to the middle, partly loaded).
+    fn mock_list_screens(&mut self, screen: Option<ScreenshotScreen>) {
+        match screen {
+            Some(ScreenshotScreen::Reactions) => {
+                let m = self
+                    .chat
+                    .messages
+                    .get(&mock::CH_GENERAL)
+                    .and_then(|w| w.messages.iter().find(|m| m.reactions.len() >= 2))
+                    .map(|m| m.id);
+                if let Some(m) = m {
+                    let _ = self.update_ui(Ui::OpenReactors(m, None));
+                }
+            }
+            Some(ScreenshotScreen::MembersLarge) => {
+                // Once to learn the length, then (subscribed there) the rows.
+                let ctx = self.ctx();
+                self.chat.apply_event(
+                    &Event::MemberList(Box::new(mock::large_member_list())),
+                    &ctx,
+                );
+                let y = self.chat.member_list.as_ref().map_or(0.0, |l| {
+                    crate::ui::members::ROWS.offset(&l.header_rows(), 1488)
+                });
+                let _ = self.members_scrolled(y, 760.0);
+                self.chat.apply_event(
+                    &Event::MemberList(Box::new(mock::large_member_list())),
+                    &ctx,
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn mock_round3_screen(&mut self, s: ScreenshotScreen) {
         use ScreenshotScreen as S;
         use panels::Popover;
@@ -888,6 +1024,113 @@ impl App {
             S::SearchFilters => {
                 let _ = self.update_ui(Ui::SearchChanged("from:alice has:link".into()));
                 let _ = self.update_ui(Ui::SubmitSearch);
+            }
+            S::ServerMenu | S::ServerSettings | S::ServerInvite | S::DeleteServer => {
+                // Game Night is owned by the mock user.
+                let g = mock::GUILD_GAMES;
+                self.view = View::Guild {
+                    guild: g,
+                    channel: self.chat.default_channel(g),
+                };
+                use guild_admin::{AdminDone, AdminUi};
+                match s {
+                    S::ServerMenu => {
+                        let _ = self.update_admin(AdminUi::ToggleMenu(g));
+                    }
+                    S::ServerInvite => {
+                        let _ = self.update_admin(AdminUi::OpenInvite(g));
+                        let _ = self.on_admin_done(AdminDone::Invite {
+                            guild: g,
+                            result: Ok("ferro-mock".into()),
+                        });
+                    }
+                    _ => {
+                        let _ = self.update_admin(AdminUi::OpenSettings(g));
+                        if s == S::ServerSettings {
+                            let _ =
+                                self.update_admin(AdminUi::NameChanged("Game Night LAN".into()));
+                        } else {
+                            let _ = self.update_admin(AdminUi::AskDelete);
+                            let _ = self.update_admin(AdminUi::DeleteTyped("Game Night".into()));
+                        }
+                    }
+                }
+            }
+            S::ChannelMenu | S::CreateChannel | S::EditChannel => {
+                let g = mock::GUILD_GAMES;
+                let help = Snowflake(412);
+                self.view = View::Guild {
+                    guild: g,
+                    channel: Some(Snowflake(411)),
+                };
+                use channel_admin::ChannelUi;
+                match s {
+                    S::ChannelMenu => {
+                        self.ctx_menu = Some(context::CtxMenu {
+                            target: context::CtxTarget::Channel(help),
+                            at: iced::Point::new(200.0, 150.0),
+                        });
+                    }
+                    S::CreateChannel => {
+                        let _ = self.update_channel_admin(ChannelUi::OpenCreate {
+                            guild: g,
+                            parent: Some(Snowflake(410)),
+                            category: false,
+                        });
+                        let _ =
+                            self.update_channel_admin(ChannelUi::CreateName("Game Plans".into()));
+                    }
+                    _ => {
+                        let _ = self.update_channel_admin(ChannelUi::OpenEdit(help));
+                        let _ = self.update_channel_admin(ChannelUi::EditTopic(
+                            "Stuck on a level? Ask here.".into(),
+                        ));
+                    }
+                }
+            }
+            S::ServerRoles | S::MemberMenu | S::MemberRoles | S::BanMember => {
+                let g = mock::GUILD_GAMES;
+                let alice = Snowflake(2);
+                self.view = View::Guild {
+                    guild: g,
+                    channel: self.chat.default_channel(g),
+                };
+                use role_admin::{ModKind, RoleUi};
+                match s {
+                    S::ServerRoles => {
+                        let _ = self.update_admin(guild_admin::AdminUi::OpenSettings(g));
+                        let _ = self.update_roles(RoleUi::Page(role_admin::SettingsPage::Roles));
+                        let _ = self.update_roles(RoleUi::Select(mock::ROLE_GAMES_MODS));
+                        let _ =
+                            self.update_roles(RoleUi::Permission(permissions::BAN_MEMBERS, true));
+                    }
+                    S::MemberMenu => {
+                        self.ctx_menu = Some(context::CtxMenu {
+                            target: context::CtxTarget::User {
+                                user: alice,
+                                guild: Some(g),
+                            },
+                            at: iced::Point::new(700.0, 150.0),
+                        });
+                    }
+                    S::MemberRoles => {
+                        let _ = self.update_roles(RoleUi::OpenMemberRoles {
+                            guild: g,
+                            user: alice,
+                        });
+                    }
+                    _ => {
+                        let _ = self.update_roles(RoleUi::OpenModeration {
+                            guild: g,
+                            user: alice,
+                            kind: ModKind::Ban,
+                        });
+                        let _ = self.update_roles(RoleUi::Reason("Spamming invites".into()));
+                    }
+                }
+            }
+            S::LeaveServer => {
+                let _ = self.update_admin(guild_admin::AdminUi::AskLeave(mock::GUILD_RUST));
             }
             _ => {}
         }
@@ -1143,11 +1386,15 @@ impl App {
                 if !(url.starts_with("https://") || url.starts_with("http://")) || self.cfg.mock {
                     return Task::none();
                 }
-                Task::perform(open_url(url), |_| Message::Done(Done::Ignored))
+                Task::perform(opener::open(url), |_| Message::Done(Done::Ignored))
             }
             Ui::Logout => self.logout(),
             Ui::Voice(v) => self.update_voice(v),
             Ui::Settings(s) => self.update_settings(s),
+            Ui::Admin(a) => self.update_admin(a),
+            Ui::Channel(c) => self.update_channel_admin(c),
+            Ui::Roles(r) => self.update_roles(r),
+            Ui::Friends(f) => self.update_friends(f),
             Ui::WindowFocus(f) => {
                 self.window_focused = f;
                 if f && let Some(c) = self.open_channel() {
@@ -1219,6 +1466,8 @@ impl App {
         }
         self.view = view;
         self.composer.clear();
+        self.reactions.dialog = None;
+        self.reactions.hovered = None;
         let next = match view {
             View::Home(c) => c,
             View::Guild { channel, .. } => channel,
@@ -1391,6 +1640,8 @@ impl App {
             self.toast = Some("Messages can be at most 2000 characters.".into());
             return Task::none();
         }
+        // Emoji written in the message count as used (also in a caption).
+        self.note_emoji(emoji::used_in(&content));
         if !self.draft.is_empty() {
             // Files go as a multipart upload; the text is the caption.
             return self.start_upload(c, content);
@@ -1603,6 +1854,20 @@ impl App {
         }
         let ctx = self.ctx();
         let effects = self.chat.apply_event(&ev, &ctx);
+        match &ev {
+            Event::Reaction(r) => self.reactions_event(r),
+            Event::MessageDelete { id, .. } => self.reactions.cache.forget(*id, None),
+            Event::ChannelRecipient { channel_id, .. } if !self.cfg.mock => {
+                if let Some(c) = self.chat.channels.get(channel_id).cloned() {
+                    let store = self.store.clone();
+                    tasks.push(Task::perform(
+                        async move { store.blocking(move |s| s.upsert_channel(&c)).await },
+                        |_| Message::Done(Done::Ignored),
+                    ));
+                }
+            }
+            _ => {}
+        }
         self.plugin_observe(&ev);
         tasks.push(self.voice_on_gateway(&ev));
         if matches!(ev, Event::Ready(_) | Event::GuildFolders(_)) {
@@ -1627,7 +1892,12 @@ impl App {
             tasks.push(self.sync_members());
             tasks.push(self.load_user_settings());
         }
-        if matches!(ev, Event::MessageCreate(_) | Event::MemberList(_)) {
+        // Link previews arrive in a MESSAGE_UPDATE a few seconds after the
+        // message itself (Discord unfurls the URL), so their thumbnails are
+        // fetched then rather than whenever the next message comes in.
+        if matches!(ev, Event::MessageCreate(_) | Event::MemberList(_))
+            || matches!(ev, Event::MessageUpdate(p) if update_brings_media(&p))
+        {
             tasks.push(self.request_images());
         }
         for fx in effects {
@@ -1686,10 +1956,24 @@ impl App {
                             "Dinner at 8? 🍕\nI booked the table by the window.\nShift+Enter breaks the line,\nEnter sends it 🦀",
                         );
                     }
-                    return Task::perform(
-                        async { tokio::time::sleep(Duration::from_millis(600)).await },
-                        |_| Message::Done(Done::ScreenshotReady),
-                    );
+                    let scroll = if *screen == ScreenshotScreen::MembersLarge {
+                        iced::widget::operation::scroll_to(
+                            crate::ui::members::scroll_id(),
+                            iced::widget::scrollable::AbsoluteOffset {
+                                x: None,
+                                y: Some(self.members_viewport.0),
+                            },
+                        )
+                    } else {
+                        Task::none()
+                    };
+                    return Task::batch([
+                        scroll,
+                        Task::perform(
+                            async { tokio::time::sleep(Duration::from_millis(600)).await },
+                            |_| Message::Done(Done::ScreenshotReady),
+                        ),
+                    ]);
                 }
                 if matches!(self.auth, AuthState::LoggedOut { .. })
                     && self.qr.is_none()
@@ -1701,6 +1985,7 @@ impl App {
             }
             Done::Voice(d) => self.on_voice_done(d),
             Done::Settings(d) => self.on_settings_done(*d),
+            Done::Friends(d) => self.on_friends_done(*d),
             Done::ScreenshotReady => iced::window::latest()
                 .and_then(iced::window::screenshot)
                 .map(|s| Message::Done(Done::Screenshot(s))),
@@ -1909,6 +2194,8 @@ impl App {
             Done::Newer { channel, result } => self.on_newer(channel, result),
             Done::Search { generation, result } => self.on_search_done(generation, result),
             Done::GifSearchDue(generation) => self.gif_search_due(generation),
+            Done::ReactionHoverDue(generation) => self.reaction_hover_due(generation),
+            Done::Reactors { fetch, result } => self.reactors_done(&fetch, result),
             Done::Gifs { generation, result } => {
                 if let Some(p) = self.gif_picker.as_mut() {
                     p.finish(generation, result);
@@ -1976,6 +2263,9 @@ impl App {
             Done::Invite { generation, result } => self.on_invite(generation, result),
             Done::Joined { generation, result } => self.on_joined(generation, result),
             Done::Created(r) => self.on_created(r),
+            Done::Admin(d) => self.on_admin_done(d),
+            Done::Channel(d) => self.on_channel_done(d),
+            Done::Roles(d) => self.on_roles_done(d),
             Done::IconPicked(r) => self.on_icon_picked(r),
             Done::DiscoverCategories(r) => {
                 if let (Some(d), Ok(c)) = (self.discover.as_mut(), r) {
@@ -2172,6 +2462,21 @@ impl App {
                 );
             }
         }
+        // Recent custom emoji: the picker's section and the quick reactions
+        // of the hover bar.
+        {
+            let access = self.nitro_access();
+            let recent = emoji::recent_shown(&self.recent_emoji, &self.chat.guilds, &access);
+            let n = match &self.emoji_picker {
+                Some(o) if o.picker.section == emoji::Section::Recent => recent.len(),
+                _ => emoji::QUICK_REACTIONS,
+            };
+            for item in recent.into_iter().take(n) {
+                if let emoji::RecentItem::Custom(_, e, _) = item {
+                    urls.push(emoji_url(&self.cfg.cdn_url, e.id));
+                }
+            }
+        }
         if let Some(open) = &self.emoji_picker {
             let access = self.nitro_access();
             for (_, e, _) in emoji::shown_custom(&open.picker, &self.chat.guilds, &access) {
@@ -2185,7 +2490,7 @@ impl App {
             }
         }
         if let Some(l) = &self.chat.member_list {
-            for item in l.loaded().take(120) {
+            for item in l.loaded_in(self.member_window()) {
                 if let MemberItem::Member(m) = item
                     && let Some(u) = self.rest.avatar_url(&m.user, 80)
                 {
@@ -2451,6 +2756,14 @@ fn input_message(e: iced::Event, status: iced::event::Status) -> Option<Message>
         }) if modifiers.command() && c.as_str().eq_ignore_ascii_case("v") => {
             Some(Message::Ui(Ui::Paste))
         }
+        // Ctrl+K: "Find or start a conversation".
+        iced::Event::Keyboard(Key::KeyPressed {
+            key: K::Character(c),
+            modifiers,
+            ..
+        }) if modifiers.command() && !modifiers.shift() && c.as_str().eq_ignore_ascii_case("k") => {
+            Some(Message::Ui(Ui::Friends(friends::FriendsUi::OpenSwitcher)))
+        }
         // Ctrl+Q quits, like the official client on Linux and Windows.
         iced::Event::Keyboard(Key::KeyPressed {
             key: K::Character(c),
@@ -2575,32 +2888,11 @@ fn notify(n: state::Notification, mock: bool, sound: bool) -> Task<Message> {
     )
 }
 
-async fn open_url(url: String) {
-    let _ = tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "linux")]
-        let cmd = "xdg-open";
-        #[cfg(target_os = "macos")]
-        let cmd = "open";
-        #[cfg(target_os = "windows")]
-        let cmd = "explorer";
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        let cmd = "xdg-open";
-        // Wait for the opener so it is reaped (xdg-open/open return as soon
-        // as the browser has been handed the URL).
-        match std::process::Command::new(cmd)
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                let _ = child.wait();
-            }
-            Err(e) => tracing::warn!(error = %e, "could not launch URL opener"),
-        }
-    })
-    .await;
+/// Whether a MESSAGE_UPDATE carries media to fetch: new embeds (link
+/// previews, Twitter/X photos) or attachments.
+fn update_brings_media(p: &crate::net::model::MessagePatch) -> bool {
+    p.embeds.as_ref().is_some_and(|e| !e.is_empty())
+        || p.attachments.as_ref().is_some_and(|a| !a.is_empty())
 }
 
 fn save_png(path: &std::path::Path, shot: &iced::window::Screenshot) -> crate::error::Result<()> {
@@ -2616,6 +2908,27 @@ fn save_png(path: &std::path::Path, shot: &iced::window::Screenshot) -> crate::e
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_preview_updates_fetch_their_media() {
+        use crate::net::model::{Embed, MessagePatch};
+        let edit = MessagePatch {
+            content: Some("edited".into()),
+            edited: true,
+            ..Default::default()
+        };
+        assert!(!update_brings_media(&edit));
+        let cleared = MessagePatch {
+            embeds: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!update_brings_media(&cleared));
+        let unfurled = MessagePatch {
+            embeds: Some(vec![Embed::default()]),
+            ..Default::default()
+        };
+        assert!(update_brings_media(&unfurled));
+    }
 
     #[test]
     fn ctrl_q_quits() {

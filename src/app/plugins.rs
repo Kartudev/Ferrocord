@@ -313,7 +313,7 @@ impl App {
                         let d = dir.clone();
                         let _ =
                             tokio::task::spawn_blocking(move || std::fs::create_dir_all(d)).await;
-                        super::open_url(dir.to_string_lossy().into_owned()).await
+                        super::opener::open(dir.to_string_lossy().into_owned()).await
                     },
                     |_| Message::Done(Done::Ignored),
                 )

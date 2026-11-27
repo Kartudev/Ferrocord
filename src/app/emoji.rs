@@ -22,6 +22,16 @@ pub const CATEGORIES: [(Group, &str); 9] = [
 /// Most results shown for a search.
 pub const MAX_RESULTS: usize = 120;
 
+/// `meta` key of the recently used emoji (a `pref.` key: kept on logout).
+pub const RECENT_KEY: &str = "pref.recent_emoji";
+
+/// Most recently used emoji kept: four rows of the picker.
+pub const RECENT_MAX: usize = 36;
+
+/// Recent emoji offered as one-click reactions on a message's hover bar,
+/// like the official client's.
+pub const QUICK_REACTIONS: usize = 3;
+
 /// Where a picked emoji goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerTarget {
@@ -37,6 +47,8 @@ pub enum PickerTarget {
 /// Which list the picker shows when the search box is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    /// The recently used emoji ([`Recent`]).
+    Recent,
     /// Custom emoji of this server.
     Server(GuildId),
     /// Index into [`CATEGORIES`].
@@ -54,9 +66,11 @@ pub struct EmojiPicker {
 }
 
 impl EmojiPicker {
-    /// Opens on the open server's custom emoji when it has any, else people.
-    pub fn open(target: PickerTarget, guild: Option<&Guild>) -> Self {
+    /// Opens on the recently used emoji when there are any, else on the
+    /// open server's custom emoji when it has any, else people.
+    pub fn open(target: PickerTarget, guild: Option<&Guild>, has_recent: bool) -> Self {
         let section = match guild {
+            _ if has_recent => Section::Recent,
             Some(g) if g.emojis.iter().any(|e| e.available) => Section::Server(g.id),
             _ => Section::Unicode(0),
         };
@@ -147,7 +161,7 @@ pub fn shown_custom<'a>(
     let sections: Vec<&Guild> = if q.is_empty() {
         match picker.section {
             Section::Server(id) => guilds.iter().filter(|g| g.id == id).collect(),
-            Section::Unicode(_) => vec![],
+            Section::Unicode(_) | Section::Recent => vec![],
         }
     } else {
         server_sections(guilds, access)
@@ -176,6 +190,159 @@ pub fn find_custom(guilds: &[Guild], id: Snowflake) -> Option<(&Guild, &CustomEm
     guilds
         .iter()
         .find_map(|g| g.emojis.iter().find(|e| e.id == id).map(|e| (g, e)))
+}
+
+/// The recently used emoji, most recent first, without duplicates and at
+/// most [`RECENT_MAX`]. Kept locally in `meta(RECENT_KEY)`; updated when an
+/// emoji is picked, reacted with or sent in a message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recent {
+    list: Vec<Emoji>,
+}
+
+impl Recent {
+    /// Reads the saved list; a missing or broken value is an empty list.
+    pub fn load(store: &crate::store::Store) -> Self {
+        let list: Vec<Emoji> = store
+            .meta(RECENT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut r = Self::default();
+        // Oldest first, so the saved order is kept and the list cleaned.
+        for e in list.into_iter().rev() {
+            r.record(e);
+        }
+        r
+    }
+
+    /// The JSON saved under [`RECENT_KEY`].
+    pub fn to_json(&self) -> Option<String> {
+        serde_json::to_string(&self.list).ok()
+    }
+
+    pub fn list(&self) -> &[Emoji] {
+        &self.list
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Moves `e` to the front (added if new). Unicode emoji are stored in
+    /// their fully qualified form, so "❤" and "❤️" are one entry. Returns
+    /// whether the list changed.
+    pub fn record(&mut self, mut e: Emoji) -> bool {
+        if e.id.is_none() {
+            match emojis::get(&e.name) {
+                Some(u) => e.name = u.as_str().to_owned(),
+                // Not an emoji (a hand-edited or broken entry).
+                None => return false,
+            }
+        }
+        if self.list.first() == Some(&e) && self.list[0].name == e.name {
+            return false;
+        }
+        self.list.retain(|x| x != &e);
+        self.list.insert(0, e);
+        self.list.truncate(RECENT_MAX);
+        true
+    }
+}
+
+/// One emoji of the "Recently Used" section, as the picker draws it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecentItem<'a> {
+    Unicode(&'a str),
+    Custom(&'a Guild, &'a CustomEmoji, Usable),
+}
+
+/// The recent emoji the picker can show, in order. Custom emoji of servers
+/// the user left, or that nobody can use any more, are left out; locked ones
+/// stay, with their state (like the other sections).
+pub fn recent_shown<'a>(
+    recent: &'a Recent,
+    guilds: &'a [Guild],
+    access: &Access<'_>,
+) -> Vec<RecentItem<'a>> {
+    recent
+        .list()
+        .iter()
+        .filter_map(|e| match e.id {
+            None => Some(RecentItem::Unicode(e.name.as_str())),
+            Some(id) => {
+                let (g, ce) = find_custom(guilds, id)?;
+                let u = access.emoji(g, ce);
+                (u != Usable::Hidden).then_some(RecentItem::Custom(g, ce, u))
+            }
+        })
+        .collect()
+}
+
+/// The first [`QUICK_REACTIONS`] recent emoji the user can react with here.
+pub fn quick_reactions<'a>(
+    recent: &'a Recent,
+    guilds: &'a [Guild],
+    access: &Access<'_>,
+) -> Vec<RecentItem<'a>> {
+    recent_shown(recent, guilds, access)
+        .into_iter()
+        .filter(|i| !matches!(i, RecentItem::Custom(_, _, u) if *u != Usable::Yes))
+        .take(QUICK_REACTIONS)
+        .collect()
+}
+
+/// The emoji used in a message's text, in order: custom emoji written as
+/// `<:name:id>` / `<a:name:id>` and Unicode emoji.
+pub fn used_in(text: &str) -> Vec<Emoji> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.starts_with('<')
+            && let Some((e, len)) = parse_custom(rest)
+        {
+            out.push(e);
+            rest = &rest[len..];
+            continue;
+        }
+        let Some(g) = rest.graphemes(true).next() else {
+            break;
+        };
+        if crate::ui::emoji_font::is_emoji_cluster(g)
+            && let Some(u) = emojis::get(g)
+        {
+            out.push(Emoji::unicode(u.as_str()));
+        }
+        rest = &rest[g.len()..];
+    }
+    out
+}
+
+/// A custom emoji tag at the start of `s`, with its length in bytes.
+fn parse_custom(s: &str) -> Option<(Emoji, usize)> {
+    let end = s.find('>')?;
+    let inner = &s[1..end];
+    let (animated, inner) = match inner.strip_prefix("a:") {
+        Some(r) => (true, r),
+        None => (false, inner.strip_prefix(':')?),
+    };
+    let (name, id) = inner.split_once(':')?;
+    let valid_name = (2..=32).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !valid_name || id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let id: u64 = id.parse().ok()?;
+    Some((
+        Emoji {
+            id: Some(Snowflake(id)),
+            name: name.to_owned(),
+            animated,
+        },
+        end + 1,
+    ))
 }
 
 #[cfg(test)]
@@ -234,12 +401,17 @@ mod tests {
             available: true,
             roles: vec![],
         }]);
-        let p = EmojiPicker::open(PickerTarget::Composer, Some(&g));
+        let p = EmojiPicker::open(PickerTarget::Composer, Some(&g), false);
         assert_eq!(p.section, Section::Server(Snowflake(1)));
-        let p = EmojiPicker::open(PickerTarget::Composer, Some(&guild_with(vec![])));
+        let p = EmojiPicker::open(PickerTarget::Composer, Some(&guild_with(vec![])), false);
         assert_eq!(p.section, Section::Unicode(0));
-        let p = EmojiPicker::open(PickerTarget::Composer, None);
+        let p = EmojiPicker::open(PickerTarget::Composer, None, false);
         assert_eq!(p.section, Section::Unicode(0));
+        // Recently used emoji come first when there are any.
+        let p = EmojiPicker::open(PickerTarget::Composer, Some(&g), true);
+        assert_eq!(p.section, Section::Recent);
+        let p = EmojiPicker::open(PickerTarget::Composer, None, true);
+        assert_eq!(p.section, Section::Recent);
     }
 
     fn access(here: Option<GuildId>, premium_type: u8) -> Access<'static> {
@@ -296,7 +468,7 @@ mod tests {
     fn shown_emoji_carry_their_lock_state() {
         let g = two_servers();
         let acc = access(Some(Snowflake(1)), 0);
-        let mut p = EmojiPicker::open(PickerTarget::Composer, g.first());
+        let mut p = EmojiPicker::open(PickerTarget::Composer, g.first(), false);
         let shown = |p: &EmojiPicker, acc: &Access<'_>| {
             shown_custom(p, &g, acc)
                 .iter()
@@ -351,5 +523,122 @@ mod tests {
         assert_eq!(custom_matching(&g, "party").len(), 1);
         assert_eq!(custom_matching(&g, "").len(), 1);
         assert!(custom_matching(&g, "nope").is_empty());
+    }
+
+    fn custom(id: u64, name: &str) -> Emoji {
+        Emoji {
+            id: Some(Snowflake(id)),
+            name: name.into(),
+            animated: false,
+        }
+    }
+
+    #[test]
+    fn recent_is_most_recent_first_without_duplicates() {
+        let mut r = Recent::default();
+        assert!(r.record(Emoji::unicode("👍")));
+        assert!(r.record(custom(10, "wave")));
+        assert!(r.record(Emoji::unicode("🦀")));
+        // Used again: moves to the front instead of being added twice.
+        assert!(r.record(Emoji::unicode("👍")));
+        assert!(!r.record(Emoji::unicode("👍")));
+        // A renamed custom emoji is the same emoji (same id).
+        assert!(r.record(custom(10, "wave_renamed")));
+        let names: Vec<&str> = r.list().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["wave_renamed", "👍", "🦀"]);
+    }
+
+    #[test]
+    fn recent_normalises_unicode_and_skips_non_emoji() {
+        let mut r = Recent::default();
+        assert!(r.record(Emoji::unicode("❤")));
+        assert!(!r.record(Emoji::unicode("❤\u{FE0F}")));
+        assert_eq!(r.list().len(), 1);
+        assert!(!r.record(Emoji::unicode("abc")));
+        assert_eq!(r.list().len(), 1);
+    }
+
+    #[test]
+    fn recent_is_capped() {
+        let mut r = Recent::default();
+        for e in emojis::iter().take(RECENT_MAX + 10) {
+            r.record(Emoji::unicode(e.as_str()));
+        }
+        assert_eq!(r.list().len(), RECENT_MAX);
+        let newest = emojis::iter().nth(RECENT_MAX + 9).map(|e| e.as_str());
+        assert_eq!(r.list().first().map(|e| e.name.as_str()), newest);
+    }
+
+    #[test]
+    fn recent_survives_a_restart() {
+        let store = crate::store::Store::open(None).unwrap();
+        assert!(Recent::load(&store).is_empty());
+        let mut r = Recent::default();
+        r.record(Emoji::unicode("🦀"));
+        r.record(custom(10, "wave"));
+        store.set_meta(RECENT_KEY, &r.to_json().unwrap()).unwrap();
+        assert_eq!(Recent::load(&store), r);
+        // A broken value is an empty list, not an error.
+        store.set_meta(RECENT_KEY, "not json").unwrap();
+        assert!(Recent::load(&store).is_empty());
+        // Logging out keeps it (`pref.` key).
+        store.set_meta(RECENT_KEY, &r.to_json().unwrap()).unwrap();
+        store.clear().unwrap();
+        assert_eq!(Recent::load(&store), r);
+    }
+
+    #[test]
+    fn recent_shown_hides_unknown_and_unusable_custom_emoji() {
+        let g = two_servers();
+        let mut r = Recent::default();
+        r.record(custom(404, "left_server"));
+        r.record(custom(21, "staff_only"));
+        r.record(custom(20, "wave_big"));
+        r.record(Emoji::unicode("🦀"));
+        r.record(custom(10, "wave"));
+        let acc = access(Some(Snowflake(1)), 0);
+        let ids = |v: Vec<RecentItem<'_>>| {
+            v.iter()
+                .map(|i| match i {
+                    RecentItem::Unicode(s) => ((*s).to_owned(), Usable::Yes),
+                    RecentItem::Custom(_, e, u) => (e.id.0.to_string(), *u),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(recent_shown(&r, &g, &acc)),
+            vec![
+                ("10".to_owned(), Usable::Yes),
+                ("🦀".to_owned(), Usable::Yes),
+                ("20".to_owned(), Usable::NeedsNitro),
+            ]
+        );
+        // Quick reactions skip the locked one.
+        assert_eq!(
+            ids(quick_reactions(&r, &g, &acc)),
+            vec![
+                ("10".to_owned(), Usable::Yes),
+                ("🦀".to_owned(), Usable::Yes)
+            ]
+        );
+    }
+
+    #[test]
+    fn used_in_finds_custom_and_unicode_emoji_in_order() {
+        let found = used_in("hi 👋 <:wave:10> and <a:party:11>! ❤ <:bad name:12> <:x:abc>");
+        let got: Vec<(Option<u64>, &str, bool)> = found
+            .iter()
+            .map(|e| (e.id.map(|i| i.0), e.name.as_str(), e.animated))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (None, "👋", false),
+                (Some(10), "wave", false),
+                (Some(11), "party", true),
+                (None, "❤\u{FE0F}", false),
+            ]
+        );
+        assert!(used_in("plain text, 123 #*").is_empty());
     }
 }

@@ -11,8 +11,8 @@
       "id": "2000000000000000001",
       "properties": { "name": "Rust Programming", "icon": "iconhash", "owner_id": "1000000000000000002" },
       "roles": [
-        { "id": "2000000000000000001", "name": "@everyone", "color": 0, "position": 0 },
-        { "id": "3000000000000000001", "name": "Moderator", "color": 3066993, "position": 2 }
+        { "id": "2000000000000000001", "name": "@everyone", "color": 0, "position": 0, "permissions": "1071698660929" },
+        { "id": "3000000000000000001", "name": "Moderator", "color": 3066993, "position": 2, "permissions": "8192" }
       ],
       "channels": [
         { "id": "4000000000000000001", "type": 4, "name": "Text Channels", "position": 0 },

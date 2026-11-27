@@ -194,6 +194,27 @@ pub struct Channel {
     /// DM / group DM participants (excluding the current user).
     pub recipients: Vec<UserId>,
     pub nsfw: bool,
+    /// Permission overwrites (server channels only).
+    #[serde(default)]
+    pub overwrites: Vec<PermissionOverwrite>,
+    /// A DM from someone who is not a friend, waiting in Message Requests
+    /// (`is_message_request`). Hidden from the DM list until accepted.
+    #[serde(default)]
+    pub message_request: bool,
+    /// A message request Discord filed as spam (`is_spam`).
+    #[serde(default)]
+    pub spam: bool,
+}
+
+/// One channel permission overwrite: a role (or `@everyone`, whose id is
+/// the guild id) or a single member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionOverwrite {
+    pub id: Snowflake,
+    /// `true` = a member, `false` = a role.
+    pub member: bool,
+    pub allow: u64,
+    pub deny: u64,
 }
 
 impl Channel {
@@ -402,6 +423,9 @@ pub struct Reaction {
     pub count: u32,
     /// The current user reacted with this emoji.
     pub me: bool,
+    /// How many of `count` are burst ("super") reactions.
+    #[serde(default)]
+    pub burst_count: u32,
 }
 
 /// The message a reply points at, as shown in the reply header.
@@ -834,6 +858,48 @@ impl GuildFolder {
     }
 }
 
+/// Kind of a relationship (`type` in READY `relationships` and the
+/// `RELATIONSHIP_*` events).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RelationshipKind {
+    Friend,
+    Blocked,
+    /// A friend request someone sent us.
+    Incoming,
+    /// A friend request we sent.
+    Outgoing,
+    /// Someone Discord thinks we know (the "Implicit" tab).
+    Implicit,
+}
+
+impl RelationshipKind {
+    pub fn from_wire(t: u8) -> Option<Self> {
+        Some(match t {
+            1 => Self::Friend,
+            2 => Self::Blocked,
+            3 => Self::Incoming,
+            4 => Self::Outgoing,
+            5 => Self::Implicit,
+            _ => return None,
+        })
+    }
+}
+
+/// One entry of the friends list (or a pending request, a block, ...).
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Relationship {
+    pub user_id: UserId,
+    pub kind: RelationshipKind,
+    /// The friend nickname the user set (only they see it).
+    pub nickname: Option<String>,
+}
+
+impl fmt::Debug for Relationship {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Relationship({}, {:?})", self.user_id, self.kind)
+    }
+}
+
 /// Everything the client needs from READY (+ READY_SUPPLEMENTAL).
 #[derive(Debug, Clone, Default)]
 pub struct ReadyData {
@@ -869,6 +935,8 @@ pub struct ReadyData {
     pub channel_notify: Vec<(ChannelId, super::extras::ChannelNotify)>,
     /// Users in guild voice channels.
     pub voice_states: Vec<VoiceState>,
+    /// Friends, friend requests, blocks and implicit relationships.
+    pub relationships: Vec<Relationship>,
 }
 
 /// A member shown in the member list.
@@ -951,12 +1019,16 @@ pub enum ReactionEvent {
         message_id: MessageId,
         user_id: UserId,
         emoji: Emoji,
+        /// A burst ("super") reaction.
+        burst: bool,
     },
     Remove {
         channel_id: ChannelId,
         message_id: MessageId,
         user_id: UserId,
         emoji: Emoji,
+        /// A burst ("super") reaction.
+        burst: bool,
     },
     RemoveAll {
         channel_id: ChannelId,

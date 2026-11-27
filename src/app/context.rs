@@ -16,6 +16,8 @@ pub enum CtxTarget {
         guild: Option<GuildId>,
     },
     Channel(ChannelId),
+    /// The server dropdown (header chevron).
+    Guild(GuildId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,6 +68,7 @@ impl App {
             }
             Ui::MarkGuildRead(g) => {
                 self.rail.menu = None;
+                self.ctx_menu = None;
                 let ids: Vec<ChannelId> = self
                     .chat
                     .channels
@@ -82,6 +85,7 @@ impl App {
             }
             Ui::MuteGuild(g, mute) => {
                 self.rail.menu = None;
+                self.ctx_menu = None;
                 if mute {
                     self.chat.muted_guilds.insert(g);
                 } else {
@@ -96,6 +100,7 @@ impl App {
             }
             Ui::SuppressEveryone(g, on) => {
                 self.rail.menu = None;
+                self.ctx_menu = None;
                 if on {
                     self.chat.suppress_everyone.insert(g);
                 } else {
